@@ -78,6 +78,7 @@ const emptyPile = () => ({
   feet: [],
   groutBands: [],
   refusalDepth: null,
+  notInstalled: false,           // marked when a pile has to be redrilled — shows "Not Installed" in summary
   pileKind: "ACIP",              // "ACIP" | "RI" (Rigid Inclusion — unreinforced)
   footInterval: 1,               // record seconds/torque every N ft (1 or 5)
   groutInterval: 5,              // grout band spacing in ft (5 or 10)
@@ -136,70 +137,96 @@ const calcDerived = (pile, project) => {
   return { drillDepth, theoretical, totalStrokes, actual, groutFactor, calibFactor, tipElevation, cutoffElevation, pileLength };
 };
 
-// ── KNm Torque Stepper (plus/minus) ───────────────────────────────────────────
+// ── KNm Torque Slider (vertical) ──────────────────────────────────────────────
 // Only hard drilling matters: default "<75" (not recorded), then 80→180 in 5s.
-// Big value readout sits above the buttons so it's never covered by a thumb.
+// Big value readout sits above the track so it's never covered by a thumb.
 const KNM_VALUES = ["<75", ...Array.from({ length: 21 }, (_, i) => String(80 + i * 5))];
 const DEFAULT_KNM_IDX = 0;
 
 function KnmWheel({ value, onChange }) {
   const initIdx = value ? Math.max(0, KNM_VALUES.indexOf(String(value))) : DEFAULT_KNM_IDX;
   const [idx, setIdx] = useState(initIdx);
+  const trackRef = useRef(null);
+  const draggingRef = useRef(false);
+  const TRACK_H = 170;
+  const N = KNM_VALUES.length;
 
   // Keep in sync if the parent's value changes from outside (e.g. carried
   // forward from the previous foot).
   useEffect(() => {
     const i = value ? Math.max(0, KNM_VALUES.indexOf(String(value))) : DEFAULT_KNM_IDX;
-    setIdx(i);
+    if (!draggingRef.current) setIdx(i);
   }, [value]);
 
   const commitIdx = (i) => {
-    const c = Math.max(0, Math.min(KNM_VALUES.length - 1, i));
+    const c = Math.max(0, Math.min(N - 1, Math.round(i)));
     setIdx(c);
     const val = KNM_VALUES[c];
     onChange(val === "<75" ? "" : val);
   };
 
+  // Map a pointer Y position on the track to an index: top = max (180K),
+  // bottom = min (<75) — pushing up = more torque, like a throttle.
+  const yToIdx = (clientY) => {
+    const rect = trackRef.current.getBoundingClientRect();
+    const frac = 1 - Math.max(0, Math.min(1, (clientY - rect.top) / rect.height));
+    return frac * (N - 1);
+  };
+
+  const onPointerDown = (e) => {
+    draggingRef.current = true;
+    e.currentTarget.setPointerCapture(e.pointerId);
+    commitIdx(yToIdx(e.clientY));
+  };
+  const onPointerMove = (e) => {
+    if (!draggingRef.current) return;
+    commitIdx(yToIdx(e.clientY));
+  };
+  const onPointerUp = () => { draggingRef.current = false; };
+
   const isHigh = parseInt(KNM_VALUES[idx]) > 75;
   const curVal = KNM_VALUES[idx];
+  // Thumb position: idx 0 at bottom, max at top
+  const thumbY = (1 - idx / (N - 1)) * TRACK_H;
 
   return (
     <div style={{ display:"flex", flexDirection:"column", alignItems:"center", userSelect:"none" }}>
       <div style={{ fontSize:11, fontWeight:700, color:"#a8c0d9", marginBottom:4 }}>KNm Torque</div>
+      {/* Value readout — always visible above the track, never covered by a finger */}
       <div style={{
-        width:100, borderRadius:12, background:"#071520",
-        border:"2px solid "+(isHigh?"#e74c3c":"#2d6a9f"), padding:"8px 6px",
-        display:"flex", flexDirection:"column", alignItems:"center", gap:6
+        fontSize: curVal==="<75" ? 15 : 24, fontWeight:900,
+        color: isHigh ? "#e74c3c" : "#fff", minHeight:30, marginBottom:6,
+        display:"flex", alignItems:"center", justifyContent:"center"
       }}>
-        {/* Value readout — always visible above the buttons, never covered by a finger */}
+        {curVal}{curVal!=="<75" ? "K" : ""}
+      </div>
+      <div
+        ref={trackRef}
+        onPointerDown={onPointerDown}
+        onPointerMove={onPointerMove}
+        onPointerUp={onPointerUp}
+        style={{
+          width:64, height:TRACK_H, position:"relative", borderRadius:14,
+          background:"linear-gradient(to top, #0d2236, #1e3a56 60%, #4a1510)",
+          border:"2px solid "+(isHigh?"#e74c3c":"#2d6a9f"),
+          cursor:"ns-resize", touchAction:"none"
+        }}
+      >
+        {/* tick marks at 100K and 150K for orientation */}
+        {[100,150].map(v=>{
+          const i = KNM_VALUES.indexOf(String(v));
+          const ty = (1 - i/(N-1)) * TRACK_H;
+          return <div key={v} style={{ position:"absolute", top:ty-1, left:4, right:4, height:1, background:"#3a5268", pointerEvents:"none" }}/>;
+        })}
+        {/* thumb */}
         <div style={{
-          fontSize: curVal==="<75" ? 15 : 22, fontWeight:900,
-          color: isHigh ? "#e74c3c" : "#fff", minHeight:28,
-          display:"flex", alignItems:"center", justifyContent:"center"
-        }}>
-          {curVal}{curVal!=="<75" ? "K" : ""}
-        </div>
-        <button
-          onClick={() => commitIdx(idx + 1)}
-          disabled={idx >= KNM_VALUES.length - 1}
-          style={{
-            width:"100%", padding:"10px 0", borderRadius:9, border:"none", cursor: idx >= KNM_VALUES.length-1 ? "default" : "pointer",
-            background: idx >= KNM_VALUES.length-1 ? "#1a3548" : (isHigh?"#7a2620":"#1e4a73"),
-            color:"#fff", fontSize:20, fontWeight:900, opacity: idx >= KNM_VALUES.length-1 ? 0.4 : 1
-          }}
-        >+</button>
-        <button
-          onClick={() => commitIdx(idx - 1)}
-          disabled={idx <= 0}
-          style={{
-            width:"100%", padding:"10px 0", borderRadius:9, border:"none", cursor: idx <= 0 ? "default" : "pointer",
-            background: idx <= 0 ? "#1a3548" : "#1e4a73",
-            color:"#fff", fontSize:20, fontWeight:900, opacity: idx <= 0 ? 0.4 : 1
-          }}
-        >−</button>
+          position:"absolute", top:Math.max(0,Math.min(TRACK_H-18,thumbY-9)), left:3, right:3, height:18,
+          borderRadius:9, background: isHigh ? "#e74c3c" : "#4a90d9",
+          boxShadow:"0 2px 8px rgba(0,0,0,0.5)", pointerEvents:"none"
+        }}/>
       </div>
       <div style={{ marginTop:4, fontSize:11, fontWeight:700, color: isHigh?"#e74c3c":"#4a7fa5", minHeight:16 }}>
-        {isHigh ? "⚠ HIGH" : ""}
+        {isHigh ? "⚠ HIGH" : "slide ↑"}
       </div>
     </div>
   );
@@ -217,8 +244,8 @@ function Numpad({ label, initialValue, onConfirm, onCancel }) {
   const keys = ["1","2","3","4","5","6","7","8","9","⌫","0","✓"];
   return (
     <div style={{ position:"fixed", top:0, left:0, width:"100vw", height:"100dvh", background:"rgba(0,0,0,0.75)", zIndex:300, display:"flex", alignItems:"center", justifyContent:"center" }}>
-      <div style={{ background:"#1a3a5c", borderRadius:20, padding:22, width:270, boxShadow:"0 8px 40px rgba(0,0,0,0.6)" }}>
-        <div style={{ color:"#a8c0d9", fontSize:14, marginBottom:8, textAlign:"center", fontWeight:700 }}>{label}</div>
+      <div style={{ background:"#1a3a5c", borderRadius:20, padding:22, width:290, boxShadow:"0 8px 40px rgba(0,0,0,0.6)" }}>
+        <div style={{ color:"#fff", fontSize:22, marginBottom:10, textAlign:"center", fontWeight:900, lineHeight:1.25 }}>{label}</div>
         <div style={{ background:"#071520", borderRadius:12, padding:"14px 16px", fontSize:40, fontWeight:900, color:"#fff", textAlign:"center", marginBottom:18, minHeight:60 }}>
           {val || <span style={{ color:"#2d4a5c" }}>0</span>}
         </div>
@@ -343,6 +370,9 @@ function DrillScreen({ pile, onUpdate }) {
 
   const tapFoot = () => {
     if (phase !== "drilling") return;
+    // Haptic pulse confirms the tap registered without needing to look at the
+    // screen (no-op on devices without vibration support, e.g. iPads).
+    try { if (navigator.vibrate) navigator.vibrate(40); } catch(e) {}
     const interval = pile.footInterval || 1;
     const now = Date.now();
     const secs = Math.max(0, Math.floor((now - pile.footStartEpoch) / 1000));
@@ -495,20 +525,21 @@ function DrillScreen({ pile, onUpdate }) {
               </button>
             </div>
           </div>
-          {/* Always show last 4, or all if expanded */}
+          {/* Always show last 4, or all if expanded. Whole row is the edit
+              target — a full-width tap area prevents hitting the wrong foot. */}
           {(showFullLog ? [...feet].reverse() : [...feet].reverse().slice(0,4)).map(f => {
             const hi = f.knm && parseInt(f.knm) > 75;
             const missed = f.seconds == null;
             return (
-              <div key={f.foot} style={{ display:"flex", gap:8, alignItems:"center", padding:"5px 4px", borderBottom:"1px solid #0d2236", background: missed ? "rgba(240,192,64,0.12)" : "transparent", borderRadius: missed ? 6 : 0 }}>
-                <span style={{ color:"#4fc3f7", fontWeight:700, width:34, fontSize:13 }}>{f.foot}ft</span>
-                <span style={{ color: missed ? "#f0c040" : "#fff", fontWeight:700, width:34, fontSize:13 }}>{f.seconds!=null?`${f.seconds}s`:"fill"}</span>
+              <div key={f.foot} onClick={() => setEditingFoot({...f})} style={{ display:"flex", gap:8, alignItems:"center", padding:"12px 8px", borderBottom:"1px solid #0d2236", background: missed ? "rgba(240,192,64,0.12)" : "transparent", borderRadius: missed ? 6 : 0, cursor:"pointer" }}>
+                <span style={{ color:"#4fc3f7", fontWeight:700, width:40, fontSize:15 }}>{f.foot}ft</span>
+                <span style={{ color: missed ? "#f0c040" : "#fff", fontWeight:700, width:40, fontSize:15 }}>{f.seconds!=null?`${f.seconds}s`:"fill"}</span>
                 {f.knm
-                  ? <span style={{ color:hi?"#e74c3c":"#a8c0d9", fontWeight:hi?800:400, fontSize:12, width:44 }}>{f.knm}K{hi?" ⚠":""}</span>
-                  : <span style={{ width:44, color:"#2d4a5c", fontSize:12 }}>—</span>
+                  ? <span style={{ color:hi?"#e74c3c":"#a8c0d9", fontWeight:hi?800:400, fontSize:13, width:50 }}>{f.knm}K{hi?" ⚠":""}</span>
+                  : <span style={{ width:50, color:"#2d4a5c", fontSize:13 }}>—</span>
                 }
                 <span style={{ color:"#f0c040", fontSize:11, flex:1, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>{f.note||""}</span>
-                <button onClick={() => setEditingFoot({...f})} style={{ background:"#1a3a5c", border:"none", borderRadius:6, color:"#a8c0d9", fontSize:11, padding:"3px 8px", cursor:"pointer", flexShrink:0 }}>✏️</button>
+                <span style={{ color:"#4a7fa5", fontSize:14, flexShrink:0, padding:"0 4px" }}>✏️ ›</span>
               </div>
             );
           })}
@@ -1141,11 +1172,32 @@ function drawSummaryPage(doc, project, piles) {
     { label:"Drill Depth (ft)", w:70 },
     { label:"Total Strokes", w:70 },
     { label:"Grout Factor", w:65 },
-    { label:"Drill Time", w:80 },
+    { label:"Duration", w:80 },
     { label:"Notes", w:W-margin*2-60-70-70-65-80 },
   ];
   let y = ph + 46;
   const rowPad = 5;
+
+  // Parse "h:mm AM/PM" (or "h:mm:ss AM/PM") into minutes-since-midnight
+  const toMinutes = (s) => {
+    if (!s) return null;
+    const m = String(s).match(/(\d{1,2}):(\d{2})(?::\d{2})?\s*(AM|PM)?/i);
+    if (!m) return null;
+    let h = parseInt(m[1]), mins = parseInt(m[2]);
+    const ap = (m[3]||"").toUpperCase();
+    if (ap === "PM" && h !== 12) h += 12;
+    if (ap === "AM" && h === 12) h = 0;
+    return h*60 + mins;
+  };
+  // Elapsed duration from drill start to grout end, e.g. "1h 37m"
+  const duration = (pile) => {
+    const a = toMinutes(pile.drillStart), b = toMinutes(pile.groutEnd);
+    if (a == null || b == null) return "—";
+    let diff = b - a;
+    if (diff < 0) diff += 24*60; // crossed midnight
+    const h = Math.floor(diff/60), m = diff%60;
+    return h > 0 ? `${h}h ${m}m` : `${m}m`;
+  };
 
   const drawHeader = () => {
     doc.setFillColor(210,225,245);
@@ -1159,7 +1211,7 @@ function drawSummaryPage(doc, project, piles) {
   drawHeader();
 
   doc.setFont("helvetica","normal"); doc.setFontSize(8);
-  let totalStrokesSum = 0, totalDepthSum = 0;
+  let totalStrokesSum = 0, totalDepthSum = 0, installedCount = 0;
   piles.forEach((pile, pi) => {
     const d = calcDerived(pile, project);
     const noteText = [pile.refusalDepth ? `REFUSAL @ ${pile.refusalDepth}ft` : "", pile.notes||""].filter(Boolean).join("; ");
@@ -1172,22 +1224,26 @@ function drawSummaryPage(doc, project, piles) {
     if (pi % 2 === 0) { doc.setFillColor(248,250,253); doc.rect(margin, y, W-margin*2, rowH, "F"); }
     doc.setDrawColor(180); doc.rect(margin, y, W-margin*2, rowH);
 
-    const strokesNum = parseFloat(d.totalStrokes); if(!isNaN(strokesNum)) totalStrokesSum += strokesNum;
-    const depthNum = parseFloat(d.drillDepth); if(!isNaN(depthNum)) totalDepthSum += depthNum;
+    if (!pile.notInstalled) {
+      installedCount++;
+      const strokesNum = parseFloat(d.totalStrokes); if(!isNaN(strokesNum)) totalStrokesSum += strokesNum;
+      const depthNum = parseFloat(d.drillDepth); if(!isNaN(depthNum)) totalDepthSum += depthNum;
+    }
 
     const vals = [
       pile.pileNo || `(pile ${pi+1})`,
-      d.drillDepth || "—",
+      pile.notInstalled ? "Not Installed" : (d.drillDepth || "—"),
       d.totalStrokes || "—",
       d.groutFactor || "—",
-      pile.drillStart ? `${hm(pile.drillStart)}–${hm(pile.drillEnd)}` : "—",
+      duration(pile),
     ];
     let x = margin;
     vals.forEach((v, ci) => {
       const gfLow = ci===3 && v!=="—" && parseFloat(v) < 1;
-      if (gfLow) { doc.setTextColor(180,30,30); doc.setFont("helvetica","bold"); }
+      const notInst = ci===1 && pile.notInstalled;
+      if (gfLow || notInst) { doc.setTextColor(180,30,30); doc.setFont("helvetica","bold"); }
       doc.text(String(v), x+4, y+13);
-      if (gfLow) { doc.setTextColor(0,0,0); doc.setFont("helvetica","normal"); }
+      if (gfLow || notInst) { doc.setTextColor(0,0,0); doc.setFont("helvetica","normal"); }
       x += cols[ci].w;
       doc.line(x, y, x, y+rowH);
     });
@@ -1210,7 +1266,7 @@ function drawSummaryPage(doc, project, piles) {
   doc.rect(margin, y, W-margin*2, 18, "F");
   doc.setDrawColor(100); doc.rect(margin, y, W-margin*2, 18);
   doc.setFont("helvetica","bold"); doc.setFontSize(8);
-  doc.text(`TOTAL — ${piles.length} pile${piles.length!==1?"s":""} installed${totalGrout ? `        Total grout used: ${totalGrout} CY` : ""}`, margin+4, y+12);
+  doc.text(`TOTAL — ${installedCount} pile${installedCount!==1?"s":""} installed${totalGrout ? `        Total grout used: ${totalGrout} CY` : ""}`, margin+4, y+12);
   y += 30;
 
   doc.setFont("helvetica","normal"); doc.setFontSize(7);
@@ -1354,6 +1410,7 @@ function PilePanel({ pile, index, onUpdate, onRemove, isDupNo }) {
           <span style={{color:"#4a7fa5",fontSize:11}}>{depthFt(pile)} ft · {pile.drillStart}–{pile.groutEnd}</span>
         )}
         {pile.pileKind==="RI"&&<span style={{background:"#2d6a4f",color:"#fff",fontSize:10,fontWeight:700,padding:"2px 6px",borderRadius:6}}>RI</span>}
+        {pile.notInstalled&&<span style={{background:"#c0392b",color:"#fff",fontSize:10,fontWeight:700,padding:"2px 6px",borderRadius:6}}>⛔ NOT INSTALLED</span>}
         {isDupNo&&<span style={{background:"#b7791f",color:"#fff",fontSize:11,fontWeight:700,padding:"2px 7px",borderRadius:6}}>⚠ Duplicate No.</span>}
         {pile.refusalDepth&&<span style={{background:"#c0392b",color:"#fff",fontSize:11,fontWeight:700,padding:"2px 7px",borderRadius:6}}>⛔ {pile.refusalDepth}ft</span>}
         <span style={{marginLeft:"auto",color:"#a8c0d9",fontSize:13}}>{collapsed?"▼":"▲"}</span>
@@ -1403,6 +1460,16 @@ function PilePanel({ pile, index, onUpdate, onRemove, isDupNo }) {
                 }}>{label}</button>
               ))}
             </div>
+
+            <div style={{ color:"#a8c0d9", fontSize:12, fontWeight:700, marginBottom:6 }}>Installation status</div>
+            <button onClick={()=>onUpdate({...pile,notInstalled:!pile.notInstalled})} style={{
+              width:"100%", padding:"10px 6px", borderRadius:10, marginBottom:20,
+              border: pile.notInstalled ? "2px solid #e74c3c" : "1px solid #2d4a5c",
+              background: pile.notInstalled ? "#4a1510" : "#0d2236", color: pile.notInstalled ? "#e74c3c" : "#fff",
+              fontSize:12, fontWeight:700, cursor:"pointer"
+            }}>
+              {pile.notInstalled ? "⛔ NOT INSTALLED — will show in summary (tap to undo)" : "Mark as Not Installed (pile to be redrilled)"}
+            </button>
 
             <button onClick={()=>setShowSettings(false)} style={{ width:"100%", padding:13, borderRadius:10, border:"none", background:"#27ae60", color:"#fff", fontSize:15, fontWeight:800, cursor:"pointer" }}>Done</button>
           </div>
@@ -1503,16 +1570,17 @@ function PilePanel({ pile, index, onUpdate, onRemove, isDupNo }) {
                         );
                       }
                       return (
-                        <div key={f.foot} style={{display:"flex",gap:8,alignItems:"center",padding:"3px 0",borderBottom:"1px solid #0d2236"}}>
-                          <span style={{color:"#4fc3f7",fontWeight:700,width:36,fontSize:12}}>{f.foot}ft</span>
-                          <span style={{color:"#fff",fontWeight:700,width:32,fontSize:12}}>{f.seconds!=null?`${f.seconds}s`:"—"}</span>
+                        <div key={f.foot} onClick={()=>setEditFoot({...f})} style={{display:"flex",gap:8,alignItems:"center",padding:"11px 6px",borderBottom:"1px solid #0d2236",cursor:"pointer"}}>
+                          <span style={{color:"#4fc3f7",fontWeight:700,width:40,fontSize:14}}>{f.foot}ft</span>
+                          <span style={{color:"#fff",fontWeight:700,width:38,fontSize:14}}>{f.seconds!=null?`${f.seconds}s`:"—"}</span>
                           {f.knm
-                            ?<span style={{color:hi?"#e74c3c":"#a8c0d9",fontWeight:hi?800:400,fontSize:11,width:46}}>{f.knm}K{hi?" ⚠":""}</span>
-                            :<span style={{width:46}}/>
+                            ?<span style={{color:hi?"#e74c3c":"#a8c0d9",fontWeight:hi?800:400,fontSize:12,width:50}}>{f.knm}K{hi?" ⚠":""}</span>
+                            :<span style={{width:50}}/>
                           }
                           <span style={{color:"#f0c040",fontSize:11,flex:1,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{f.note||""}</span>
-                          <button onClick={()=>setEditFoot({...f})} style={{background:"#1a3a5c",border:"none",borderRadius:6,color:"#a8c0d9",fontSize:11,padding:"3px 8px",cursor:"pointer",flexShrink:0}}>✏️</button>
-                          <button onClick={()=>{
+                          <span style={{ color:"#4a7fa5", fontSize:13, flexShrink:0 }}>✏️ ›</span>
+                          <button onClick={(e)=>{
+                            e.stopPropagation();
                             if(!window.confirm(`Delete the ${f.foot}ft entry? Other feet keep their own depths — this doesn't shift them.`)) return;
                             // Depths are no longer count×interval — each foot stores its own
                             // true depth, so deleting one just removes it (no renumbering needed,
@@ -1525,7 +1593,7 @@ function PilePanel({ pile, index, onUpdate, onRemove, isDupNo }) {
                               return match ? { ...nb, strokes: match.strokes } : nb;
                             });
                             onUpdate({ ...pile, feet: remaining, groutBands: newBands });
-                          }} style={{background:"#3d1a15",border:"none",borderRadius:6,color:"#e74c3c",fontSize:11,padding:"3px 8px",cursor:"pointer",flexShrink:0}}>🗑</button>
+                          }} style={{background:"#3d1a15",border:"none",borderRadius:8,color:"#e74c3c",fontSize:14,padding:"8px 12px",cursor:"pointer",flexShrink:0}}>🗑</button>
                         </div>
                       );
                     })}
