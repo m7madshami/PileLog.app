@@ -111,7 +111,9 @@ const PI_LANGAN = 3.14;
 const round2 = (n) => Math.round(n * 100) / 100;
 const calcDerived = (pile, project) => {
   const dia = parseFloat(pile.pileDiameter);
-  const drilledFt = depthFt(pile) || parseFloat(pile.drillDepth) || 0;
+  // Manually entered Drill Depth wins over the tap log — if the inspector
+  // corrects the depth in Details, every derived value follows that entry.
+  const drilledFt = parseFloat(pile.drillDepth) || depthFt(pile) || 0;
   const drillDepth = pile.drillDepth || (drilledFt ? String(drilledFt) : "");
   const theoretical = pile.theoreticalVol ||
     ((!isNaN(dia) && drilledFt) ? String(round2(PI_LANGAN * Math.pow(dia/24, 2) * drilledFt)) : "");
@@ -148,7 +150,7 @@ function KnmWheel({ value, onChange }) {
   const [idx, setIdx] = useState(initIdx);
   const trackRef = useRef(null);
   const draggingRef = useRef(false);
-  const TRACK_H = 170;
+  const TRACK_H = 140;
   const N = KNM_VALUES.length;
 
   // Keep in sync if the parent's value changes from outside (e.g. carried
@@ -189,17 +191,26 @@ function KnmWheel({ value, onChange }) {
   // Thumb position: idx 0 at bottom, max at top
   const thumbY = (1 - idx / (N - 1)) * TRACK_H;
 
+  const nudgeBtn = (dir, disabled) => ({
+    width:64, padding:"8px 0", borderRadius:10, border:"none",
+    cursor: disabled ? "default" : "pointer",
+    background: disabled ? "#122636" : "#1e4a73", color:"#fff",
+    fontSize:18, fontWeight:900, opacity: disabled ? 0.35 : 1
+  });
+
   return (
     <div style={{ display:"flex", flexDirection:"column", alignItems:"center", userSelect:"none" }}>
       <div style={{ fontSize:11, fontWeight:700, color:"#a8c0d9", marginBottom:4 }}>KNm Torque</div>
       {/* Value readout — always visible above the track, never covered by a finger */}
       <div style={{
         fontSize: curVal==="<75" ? 15 : 24, fontWeight:900,
-        color: isHigh ? "#e74c3c" : "#fff", minHeight:30, marginBottom:6,
+        color: isHigh ? "#e74c3c" : "#fff", minHeight:30, marginBottom:4,
         display:"flex", alignItems:"center", justifyContent:"center"
       }}>
         {curVal}{curVal!=="<75" ? "K" : ""}
       </div>
+      {/* Fine-tune: slider for coarse, +/− for single-step precision */}
+      <button onClick={() => commitIdx(idx + 1)} disabled={idx >= N-1} style={{ ...nudgeBtn("+", idx >= N-1), marginBottom:5 }}>+</button>
       <div
         ref={trackRef}
         onPointerDown={onPointerDown}
@@ -225,8 +236,9 @@ function KnmWheel({ value, onChange }) {
           boxShadow:"0 2px 8px rgba(0,0,0,0.5)", pointerEvents:"none"
         }}/>
       </div>
+      <button onClick={() => commitIdx(idx - 1)} disabled={idx <= 0} style={{ ...nudgeBtn("−", idx <= 0), marginTop:5 }}>−</button>
       <div style={{ marginTop:4, fontSize:11, fontWeight:700, color: isHigh?"#e74c3c":"#4a7fa5", minHeight:16 }}>
-        {isHigh ? "⚠ HIGH" : "slide ↑"}
+        {isHigh ? "⚠ HIGH" : ""}
       </div>
     </div>
   );
@@ -243,7 +255,7 @@ function Numpad({ label, initialValue, onConfirm, onCancel }) {
   };
   const keys = ["1","2","3","4","5","6","7","8","9","⌫","0","✓"];
   return (
-    <div style={{ position:"fixed", top:0, left:0, width:"100vw", height:"100dvh", background:"rgba(0,0,0,0.75)", zIndex:300, display:"flex", alignItems:"center", justifyContent:"center" }}>
+    <div style={{ position:"fixed", top:0, left:0, width:"100vw", height:"100dvh", background:"rgba(0,0,0,0.75)", zIndex:400, display:"flex", alignItems:"center", justifyContent:"center" }}>
       <div style={{ background:"#1a3a5c", borderRadius:20, padding:22, width:290, boxShadow:"0 8px 40px rgba(0,0,0,0.6)" }}>
         <div style={{ color:"#fff", fontSize:22, marginBottom:10, textAlign:"center", fontWeight:900, lineHeight:1.25 }}>{label}</div>
         <div style={{ background:"#071520", borderRadius:12, padding:"14px 16px", fontSize:40, fontWeight:900, color:"#fff", textAlign:"center", marginBottom:18, minHeight:60 }}>
@@ -413,6 +425,7 @@ function DrillScreen({ pile, onUpdate }) {
   const feet = pile.feet || [];
   const currentFoot = feet.length + 1;
   const [editingFoot, setEditingFoot] = useState(null); // foot object being edited
+  const [editSecsPad, setEditSecsPad] = useState(false); // numpad overlay for seconds in edit modal
   const [showFullLog, setShowFullLog] = useState(false);
   const [showFillSecs, setShowFillSecs] = useState(false);
 
@@ -458,21 +471,6 @@ function DrillScreen({ pile, onUpdate }) {
           <div style={{ display:"flex", flexDirection:"column", alignItems:"center", justifyContent:"center" }}>
             <KnmWheel value={currentKnm} onChange={setCurrentKnm} />
           </div>
-        </div>
-      )}
-
-      {/* ── Recording interval switch — available mid-drilling so the user can
-          drop to 1ft when approaching a target depth that isn't a multiple of
-          the current interval (e.g. drilling to 18ft while recording every 5ft) ── */}
-      {(phase === "drilling" || phase === "paused") && (
-        <div style={{ display:"flex", alignItems:"center", gap:8, background:"#071520", borderRadius:10, padding:"8px 10px" }}>
-          <span style={{ color:"#4a7fa5", fontSize:11, fontWeight:700, flex:1 }}>Recording every {pile.footInterval||1}ft — depth so far: {depthFt(pile)}ft</span>
-          {[1,5].map(n=>(
-            <button key={n} onClick={()=>onUpdate({...pile,footInterval:n})} style={{
-              padding:"6px 12px", borderRadius:8, border: (pile.footInterval||1)===n ? "2px solid #2ecc71" : "1px solid #2d4a5c",
-              background: (pile.footInterval||1)===n ? "#1a4a2e" : "transparent", color:"#fff", fontSize:12, fontWeight:700, cursor:"pointer"
-            }}>{n}ft</button>
-          ))}
         </div>
       )}
 
@@ -567,8 +565,19 @@ function DrillScreen({ pile, onUpdate }) {
             <div style={{ color:"#fff", fontWeight:900, fontSize:17, marginBottom:16 }}>Edit {(pile.footInterval||1)>1 ? `Depth ${editingFoot.foot}ft` : `Foot ${editingFoot.foot}`}</div>
 
             <div style={{ color:"#a8c0d9", fontSize:12, fontWeight:700, marginBottom:4 }}>Seconds</div>
-            <input type="number" value={editingFoot.seconds ?? ""} onChange={e => setEditingFoot(f=>({...f, seconds: e.target.value === "" ? null : Number(e.target.value)}))}
-              style={{ width:"100%", padding:"10px 12px", borderRadius:8, border:"1px solid #2d4a5c", background:"#071520", color:"#fff", fontSize:18, fontWeight:700, boxSizing:"border-box", marginBottom:12 }}/>
+            <div onClick={() => setEditSecsPad(true)}
+              style={{ width:"100%", padding:"12px", borderRadius:8, border:"1px solid #2d4a5c", background:"#071520", color: editingFoot.seconds!=null ? "#fff" : "#4a7fa5", fontSize:20, fontWeight:800, boxSizing:"border-box", marginBottom:12, cursor:"pointer", display:"flex", justifyContent:"space-between", alignItems:"center" }}>
+              <span>{editingFoot.seconds!=null ? `${editingFoot.seconds}s` : "tap to enter"}</span>
+              <span style={{ fontSize:13, color:"#4a7fa5" }}>⌨ numpad</span>
+            </div>
+            {editSecsPad && (
+              <Numpad
+                label={`Seconds at ${editingFoot.foot}ft`}
+                initialValue={editingFoot.seconds!=null ? String(editingFoot.seconds) : ""}
+                onConfirm={(v) => { setEditingFoot(f=>({...f, seconds: v==="" ? null : Number(v)})); setEditSecsPad(false); }}
+                onCancel={() => setEditSecsPad(false)}
+              />
+            )}
 
             <div style={{ color:"#a8c0d9", fontSize:12, fontWeight:700, marginBottom:4 }}>KNm Torque (blank = none)</div>
             <input type="number" value={editingFoot.knm || ""} onChange={e => setEditingFoot(f=>({...f, knm: e.target.value}))}
@@ -1379,6 +1388,7 @@ function PilePanel({ pile, index, onUpdate, onRemove, isDupNo }) {
   const phase = pile.groutEnd?"complete":pile.groutStart?"grouting":pile.drillEnd?"grouting-ready":pile.drillStart?"drilling":"setup";
   const [tab, setTab] = useState("log");
   const [editFoot, setEditFoot] = useState(null); // edit drill feet after completion
+  const [editSecsPad, setEditSecsPad] = useState(false); // numpad overlay for seconds in edit modal
   const [showFillSecs, setShowFillSecs] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   const [redistributeMode, setRedistributeMode] = useState(false);
@@ -1423,7 +1433,7 @@ function PilePanel({ pile, index, onUpdate, onRemove, isDupNo }) {
           <div style={{ background:"#132536", borderRadius:18, padding:22, maxWidth:340, width:"100%" }} onClick={e=>e.stopPropagation()}>
             <div style={{ color:"#fff", fontWeight:900, fontSize:17, marginBottom:4 }}>⚙️ Pile #{index+1} Settings</div>
             {settingsLocked ? (
-              <div style={{ color:"#f0c040", fontSize:12, marginBottom:16 }}>Locked once drilling starts — these apply to future piles.</div>
+              <div style={{ color:"#f0c040", fontSize:12, marginBottom:16 }}>Pile type & grout spacing lock once drilling starts. Recording interval can still be switched mid-pile (e.g. drop to 1ft near a depth that isn't a multiple of 5).</div>
             ) : (
               <div style={{ color:"#a8c0d9", fontSize:12, marginBottom:16 }}>Applies to this pile. Carries forward to the next new pile automatically.</div>
             )}
@@ -1439,13 +1449,13 @@ function PilePanel({ pile, index, onUpdate, onRemove, isDupNo }) {
               ))}
             </div>
 
-            <div style={{ color:"#a8c0d9", fontSize:12, fontWeight:700, marginBottom:6 }}>Record seconds/torque every</div>
+            <div style={{ color:"#a8c0d9", fontSize:12, fontWeight:700, marginBottom:6 }}>Record seconds/torque every <span style={{color:"#2ecc71",fontWeight:400}}>(switchable mid-pile)</span></div>
             <div style={{ display:"flex", gap:8, marginBottom:16 }}>
               {[[1,"1 ft (standard)"],[5,"5 ft (reduced)"]].map(([n,label])=>(
-                <button key={n} disabled={settingsLocked} onClick={()=>onUpdate({...pile,footInterval:n})} style={{
+                <button key={n} onClick={()=>onUpdate({...pile,footInterval:n})} style={{
                   flex:1, padding:"10px 6px", borderRadius:10, border: pile.footInterval===n ? "2px solid #2ecc71" : "1px solid #2d4a5c",
                   background: pile.footInterval===n ? "#1a4a2e" : "#0d2236", color:"#fff", fontSize:12, fontWeight:700,
-                  cursor: settingsLocked ? "default" : "pointer", opacity: settingsLocked ? 0.6 : 1
+                  cursor:"pointer"
                 }}>{label}</button>
               ))}
             </div>
@@ -1671,8 +1681,19 @@ function PilePanel({ pile, index, onUpdate, onRemove, isDupNo }) {
                     <div style={{ background:"#132536", borderRadius:18, padding:22, width:"100%", maxWidth:360 }}>
                       <div style={{ color:"#fff", fontWeight:900, fontSize:17, marginBottom:16 }}>Edit {(pile.footInterval||1)>1 ? `Depth ${editFoot.foot}ft` : `Foot ${editFoot.foot}`}</div>
                       <div style={{ color:"#a8c0d9", fontSize:12, fontWeight:700, marginBottom:4 }}>Seconds</div>
-                      <input type="number" value={editFoot.seconds ?? ""} onChange={e => setEditFoot(f=>({...f, seconds: e.target.value === "" ? null : Number(e.target.value)}))}
-                        style={{ width:"100%", padding:"10px 12px", borderRadius:8, border:"1px solid #2d4a5c", background:"#071520", color:"#fff", fontSize:18, fontWeight:700, boxSizing:"border-box", marginBottom:12 }}/>
+                      <div onClick={() => setEditSecsPad(true)}
+                        style={{ width:"100%", padding:"12px", borderRadius:8, border:"1px solid #2d4a5c", background:"#071520", color: editFoot.seconds!=null ? "#fff" : "#4a7fa5", fontSize:20, fontWeight:800, boxSizing:"border-box", marginBottom:12, cursor:"pointer", display:"flex", justifyContent:"space-between", alignItems:"center" }}>
+                        <span>{editFoot.seconds!=null ? `${editFoot.seconds}s` : "tap to enter"}</span>
+                        <span style={{ fontSize:13, color:"#4a7fa5" }}>⌨ numpad</span>
+                      </div>
+                      {editSecsPad && (
+                        <Numpad
+                          label={`Seconds at ${editFoot.foot}ft`}
+                          initialValue={editFoot.seconds!=null ? String(editFoot.seconds) : ""}
+                          onConfirm={(v) => { setEditFoot(f=>({...f, seconds: v==="" ? null : Number(v)})); setEditSecsPad(false); }}
+                          onCancel={() => setEditSecsPad(false)}
+                        />
+                      )}
                       <div style={{ color:"#a8c0d9", fontSize:12, fontWeight:700, marginBottom:4 }}>KNm Torque (blank = none)</div>
                       <input type="number" value={editFoot.knm || ""} onChange={e => setEditFoot(f=>({...f, knm: e.target.value}))}
                         style={{ width:"100%", padding:"10px 12px", borderRadius:8, border:"1px solid #2d4a5c", background:"#071520", color:"#fff", fontSize:18, fontWeight:700, boxSizing:"border-box", marginBottom:16 }}/>
