@@ -1,4 +1,4 @@
-const { useState, useRef, useEffect } = React;
+const { useState, useRef, useEffect, useLayoutEffect } = React;
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 const nowStr = () => new Date().toLocaleTimeString("en-US", { hour:"2-digit", minute:"2-digit" });
@@ -337,6 +337,80 @@ function FillSecondsModal({ pile, onUpdate, onClose }) {
 }
 
 // ── Drilling Screen ───────────────────────────────────────────────────────────
+// ── Foot Edit Modal (shared) ──────────────────────────────────────────────────
+// One popup only — tapping Seconds or KNm swaps the same modal into a numpad
+// for that field (never stacks a second overlay on top). Scroll-locks itself
+// on open so it always renders centered in the visible viewport.
+function FootEditModal({ pile, foot, feetList, onUpdate, onClose }) {
+  const [local, setLocal] = useState(foot);
+  const [editing, setEditing] = useState(null); // null | "seconds" | "knm"
+  useModalScrollLock(true);
+
+  const idx = feetList.findIndex(f => f.foot === foot.foot);
+  const atFirst = idx <= 0, atLast = idx === -1 || idx >= feetList.length - 1;
+
+  const saveAndGo = (targetIdx) => {
+    const newFeet = pile.feet.map((f,i) => i === idx ? local : f);
+    onUpdate({ ...pile, feet: newFeet });
+    if (targetIdx != null && newFeet[targetIdx]) { setLocal({ ...newFeet[targetIdx] }); setEditing(null); }
+    else onClose();
+  };
+
+  if (editing) {
+    const isSecs = editing === "seconds";
+    return (
+      <Numpad
+        label={isSecs ? `Seconds at ${local.foot}ft` : `KNm Torque at ${local.foot}ft`}
+        initialValue={isSecs ? (local.seconds!=null ? String(local.seconds) : "") : (local.knm||"")}
+        onConfirm={(v) => {
+          setLocal(f => isSecs ? { ...f, seconds: v==="" ? null : Number(v) } : { ...f, knm: v });
+          setEditing(null);
+        }}
+        onCancel={() => setEditing(null)}
+      />
+    );
+  }
+
+  const hi = local.knm && parseInt(local.knm) > 75;
+  const footLabel = (pile.footInterval||1) > 1 ? `Depth ${local.foot}ft` : `Foot ${local.foot}`;
+  const cellStyle = (danger) => ({
+    width:"100%", padding:"14px", borderRadius:8, border:`1px solid ${danger?"#e74c3c":"#2d4a5c"}`,
+    background:"#071520", fontSize:20, fontWeight:800, boxSizing:"border-box", marginBottom:14,
+    cursor:"pointer", display:"flex", justifyContent:"space-between", alignItems:"center"
+  });
+
+  return (
+    <div style={{ position:"fixed", top:0, left:0, width:"100vw", height:"100dvh", background:"rgba(0,0,0,0.75)", zIndex:300, display:"flex", alignItems:"center", justifyContent:"center", padding:16 }}>
+      <div style={{ background:"#132536", borderRadius:18, padding:22, width:"100%", maxWidth:360, boxShadow:"0 8px 32px rgba(0,0,0,0.5)" }}>
+        <div style={{ color:"#fff", fontWeight:900, fontSize:17, marginBottom:16 }}>Edit {footLabel}</div>
+
+        <div style={{ color:"#a8c0d9", fontSize:12, fontWeight:700, marginBottom:4 }}>Seconds</div>
+        <div onClick={() => setEditing("seconds")} style={{ ...cellStyle(false), color: local.seconds!=null ? "#fff" : "#4a7fa5" }}>
+          <span>{local.seconds!=null ? `${local.seconds}s` : "tap to enter"}</span>
+          <span style={{ fontSize:13, color:"#4a7fa5" }}>⌨ numpad</span>
+        </div>
+
+        <div style={{ color:"#a8c0d9", fontSize:12, fontWeight:700, marginBottom:4 }}>KNm Torque (blank = none)</div>
+        <div onClick={() => setEditing("knm")} style={{ ...cellStyle(hi), color: hi ? "#e74c3c" : local.knm ? "#fff" : "#4a7fa5" }}>
+          <span>{local.knm ? `${local.knm}K${hi?" ⚠":""}` : "tap to enter"}</span>
+          <span style={{ fontSize:13, color:"#4a7fa5" }}>⌨ numpad</span>
+        </div>
+
+        <div style={{ display:"flex", gap:8, marginBottom:8 }}>
+          <button disabled={atFirst} onClick={() => saveAndGo(idx - 1)}
+            style={{ flex:1, padding:12, borderRadius:10, border:"1px solid #2d4a5c", background: atFirst ? "#0a1a29" : "#0d2236", color: atFirst ? "#2d4a5c" : "#a8c0d9", fontSize:14, cursor: atFirst ? "default" : "pointer", fontWeight:700 }}
+          >◀ Prev</button>
+          <button onClick={() => saveAndGo(null)} style={{ flex:1.4, padding:12, borderRadius:10, border:"none", background:"#27ae60", color:"#fff", fontSize:14, cursor:"pointer", fontWeight:800 }}>✓ Done</button>
+          <button disabled={atLast} onClick={() => saveAndGo(idx + 1)}
+            style={{ flex:1, padding:12, borderRadius:10, border:"1px solid #2d4a5c", background: atLast ? "#0a1a29" : "#0d2236", color: atLast ? "#2d4a5c" : "#a8c0d9", fontSize:14, cursor: atLast ? "default" : "pointer", fontWeight:700 }}
+          >Next ▶</button>
+        </div>
+        <button onClick={onClose} style={{ width:"100%", padding:10, borderRadius:10, border:"none", background:"transparent", color:"#6a8caf", fontSize:12, cursor:"pointer" }}>Cancel without saving this foot</button>
+      </div>
+    </div>
+  );
+}
+
 function DrillScreen({ pile, onUpdate }) {
   // Phase & timing derive entirely from persisted pile data — survives
   // reloads, tab discards, and re-renders (fixes the "huge timer" bug).
@@ -425,7 +499,6 @@ function DrillScreen({ pile, onUpdate }) {
   const feet = pile.feet || [];
   const currentFoot = feet.length + 1;
   const [editingFoot, setEditingFoot] = useState(null); // foot object being edited
-  const [editSecsPad, setEditSecsPad] = useState(false); // numpad overlay for seconds in edit modal
   const [showFullLog, setShowFullLog] = useState(false);
   const [showFillSecs, setShowFillSecs] = useState(false);
 
@@ -544,69 +617,25 @@ function DrillScreen({ pile, onUpdate }) {
         </div>
       )}
 
-      {/* ── Pile Notes — available from the start of drilling, not just after grouting ── */}
-      {phase !== "idle" && (
-        <div style={{ background:"#071520", borderRadius:12, padding:"12px" }}>
-          <div style={{ color:"#4a7fa5", fontSize:10, fontWeight:700, marginBottom:3 }}>Pile Notes (appear on PDF)</div>
-          <textarea
-            value={pile.notes||""}
-            onChange={e => onUpdate({ ...pile, notes: e.target.value })}
-            rows={3}
-            placeholder="Add any notes about this pile…"
-            style={{ width:"100%", padding:"10px 12px", borderRadius:8, border:"1px solid #2d4a5c", background:"#0d2236", color:"#fff", fontSize:14, boxSizing:"border-box", resize:"vertical" }}
-          />
-        </div>
-      )}
+      {/* ── Pile Notes — available from the moment the pile is created ── */}
+      <div style={{ background:"#071520", borderRadius:12, padding:"12px" }}>
+        <div style={{ color:"#4a7fa5", fontSize:10, fontWeight:700, marginBottom:3 }}>Pile Notes (appear on PDF)</div>
+        <textarea
+          value={pile.notes||""}
+          onChange={e => onUpdate({ ...pile, notes: e.target.value })}
+          rows={3}
+          placeholder="Add any notes about this pile…"
+          style={{ width:"100%", padding:"10px 12px", borderRadius:8, border:"1px solid #2d4a5c", background:"#0d2236", color:"#fff", fontSize:14, boxSizing:"border-box", resize:"vertical" }}
+        />
+      </div>
+
+      {/* ── Grout Trucks — available from the moment the pile is created, so
+          truck info can be logged during downtime before drilling starts ── */}
+      <TrucksSection pile={pile} onUpdate={onUpdate}/>
 
       {/* ── Edit foot modal ── */}
       {editingFoot && (
-        <div style={{ position:"fixed", top:0, left:0, width:"100vw", height:"100dvh", background:"rgba(0,0,0,0.75)", zIndex:300, display:"flex", alignItems:"center", justifyContent:"center", padding:16 }}>
-          <div style={{ background:"#132536", borderRadius:18, padding:22, width:"100%", maxWidth:360, boxShadow:"0 8px 32px rgba(0,0,0,0.5)" }}>
-            <div style={{ color:"#fff", fontWeight:900, fontSize:17, marginBottom:16 }}>Edit {(pile.footInterval||1)>1 ? `Depth ${editingFoot.foot}ft` : `Foot ${editingFoot.foot}`}</div>
-
-            <div style={{ color:"#a8c0d9", fontSize:12, fontWeight:700, marginBottom:4 }}>Seconds</div>
-            <div onClick={() => setEditSecsPad(true)}
-              style={{ width:"100%", padding:"12px", borderRadius:8, border:"1px solid #2d4a5c", background:"#071520", color: editingFoot.seconds!=null ? "#fff" : "#4a7fa5", fontSize:20, fontWeight:800, boxSizing:"border-box", marginBottom:12, cursor:"pointer", display:"flex", justifyContent:"space-between", alignItems:"center" }}>
-              <span>{editingFoot.seconds!=null ? `${editingFoot.seconds}s` : "tap to enter"}</span>
-              <span style={{ fontSize:13, color:"#4a7fa5" }}>⌨ numpad</span>
-            </div>
-            {editSecsPad && (
-              <Numpad
-                label={`Seconds at ${editingFoot.foot}ft`}
-                initialValue={editingFoot.seconds!=null ? String(editingFoot.seconds) : ""}
-                onConfirm={(v) => { setEditingFoot(f=>({...f, seconds: v==="" ? null : Number(v)})); setEditSecsPad(false); }}
-                onCancel={() => setEditSecsPad(false)}
-              />
-            )}
-
-            <div style={{ color:"#a8c0d9", fontSize:12, fontWeight:700, marginBottom:4 }}>KNm Torque (blank = none)</div>
-            <input type="number" value={editingFoot.knm || ""} onChange={e => setEditingFoot(f=>({...f, knm: e.target.value}))}
-              style={{ width:"100%", padding:"10px 12px", borderRadius:8, border:`1px solid ${editingFoot.knm && parseInt(editingFoot.knm)>75?"#e74c3c":"#2d4a5c"}`, background:"#071520", color: editingFoot.knm && parseInt(editingFoot.knm)>75?"#e74c3c":"#fff", fontSize:18, fontWeight:700, boxSizing:"border-box", marginBottom:16 }}/>
-
-            {(() => {
-              const idx = feet.findIndex(f => f.foot === editingFoot.foot);
-              const atFirst = idx <= 0, atLast = idx === -1 || idx >= feet.length - 1;
-              const saveAndGo = (targetIdx) => {
-                const newFeet = pile.feet.map((f,i) => i === idx ? editingFoot : f);
-                onUpdate({ ...pile, feet: newFeet });
-                if (targetIdx != null && newFeet[targetIdx]) setEditingFoot({ ...newFeet[targetIdx] });
-                else setEditingFoot(null);
-              };
-              return (
-                <div style={{ display:"flex", gap:8, marginBottom:8 }}>
-                  <button disabled={atFirst} onClick={() => saveAndGo(idx - 1)}
-                    style={{ flex:1, padding:12, borderRadius:10, border:"1px solid #2d4a5c", background: atFirst ? "#0a1a29" : "#0d2236", color: atFirst ? "#2d4a5c" : "#a8c0d9", fontSize:14, cursor: atFirst ? "default" : "pointer", fontWeight:700 }}
-                  >◀ Prev</button>
-                  <button onClick={() => saveAndGo(null)} style={{ flex:1.4, padding:12, borderRadius:10, border:"none", background:"#27ae60", color:"#fff", fontSize:14, cursor:"pointer", fontWeight:800 }}>✓ Done</button>
-                  <button disabled={atLast} onClick={() => saveAndGo(idx + 1)}
-                    style={{ flex:1, padding:12, borderRadius:10, border:"1px solid #2d4a5c", background: atLast ? "#0a1a29" : "#0d2236", color: atLast ? "#2d4a5c" : "#a8c0d9", fontSize:14, cursor: atLast ? "default" : "pointer", fontWeight:700 }}
-                  >Next ▶</button>
-                </div>
-              );
-            })()}
-            <button onClick={() => setEditingFoot(null)} style={{ width:"100%", padding:10, borderRadius:10, border:"none", background:"transparent", color:"#6a8caf", fontSize:12, cursor:"pointer" }}>Cancel without saving this foot</button>
-          </div>
-        </div>
+        <FootEditModal pile={pile} foot={editingFoot} feetList={feet} onUpdate={onUpdate} onClose={() => setEditingFoot(null)} />
       )}
 
       {/* ── Refusal confirm ── */}
@@ -634,6 +663,39 @@ function DrillScreen({ pile, onUpdate }) {
 }
 
 // ── Grout Screen ──────────────────────────────────────────────────────────────
+// ── Grout Trucks (shared between DrillScreen pre-drilling and GroutScreen) ────
+function TrucksSection({ pile, onUpdate }) {
+  return (
+    <div style={{ background:"#071520", borderRadius:12, padding:"10px 12px" }}>
+      <div style={{ color:"#a8c0d9", fontSize:12, fontWeight:700, marginBottom:8 }}>🚛 Grout Trucks</div>
+      {(pile.trucks||[]).map((t, ti) => {
+        const setT = (field, val) => {
+          const trucks = pile.trucks.map((x,i)=>i===ti?{...x,[field]:val}:x);
+          onUpdate({...pile, trucks});
+        };
+        const inpS = { width:"100%", padding:"10px 8px", borderRadius:8, border:"1px solid #2d4a5c", background:"#0d2236", color:"#fff", fontSize:14, boxSizing:"border-box" };
+        const lblS = { color:"#4a7fa5", fontSize:10, fontWeight:700, marginBottom:2 };
+        const hasData = t.no||t.ticket||t.qty||t.batch;
+        return (
+          <div key={ti} style={{ border:`1px solid ${hasData?"#27ae60":"#1a3a5c"}`, borderRadius:10, padding:"8px 10px", marginBottom:8 }}>
+            <div style={{ color: hasData?"#2ecc71":"#4a7fa5", fontSize:11, fontWeight:800, marginBottom:6 }}>Truck #{ti+1}{ti===2?" (leftover / extra)":""}</div>
+            <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:8 }}>
+              <div><div style={lblS}>Truck No.</div>
+                <input value={t.no} onChange={e=>setT("no",e.target.value)} placeholder="4 digits" inputMode="numeric" style={inpS}/></div>
+              <div><div style={lblS}>Ticket No.</div>
+                <input value={t.ticket} onChange={e=>setT("ticket",e.target.value)} placeholder="6 digits" inputMode="numeric" style={inpS}/></div>
+              <div><div style={lblS}>Cum. Qty (CY)</div>
+                <input value={t.qty} type="number" onChange={e=>setT("qty",e.target.value)} placeholder="e.g. 9" style={inpS}/></div>
+              <div><div style={lblS}>Batch Time</div>
+                <input value={t.batch} type="time" onChange={e=>setT("batch",e.target.value)} style={{...inpS, colorScheme:"dark"}}/></div>
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
 function GroutScreen({ pile, onUpdate }) {
   const [numpadBand, setNumpadBand] = useState(null);
   const [numpadField, setNumpadField] = useState(null); // "slurryAt" | "groutAt"
@@ -746,33 +808,7 @@ function GroutScreen({ pile, onUpdate }) {
           </div>
 
           {/* Truck info — up to 3 trucks (incl. leftover grout from previous pile) */}
-          <div style={{ background:"#071520", borderRadius:12, padding:"10px 12px" }}>
-            <div style={{ color:"#a8c0d9", fontSize:12, fontWeight:700, marginBottom:8 }}>🚛 Grout Trucks</div>
-            {(pile.trucks||[]).map((t, ti) => {
-              const setT = (field, val) => {
-                const trucks = pile.trucks.map((x,i)=>i===ti?{...x,[field]:val}:x);
-                onUpdate({...pile, trucks});
-              };
-              const inpS = { width:"100%", padding:"10px 8px", borderRadius:8, border:"1px solid #2d4a5c", background:"#0d2236", color:"#fff", fontSize:14, boxSizing:"border-box" };
-              const lblS = { color:"#4a7fa5", fontSize:10, fontWeight:700, marginBottom:2 };
-              const hasData = t.no||t.ticket||t.qty||t.batch;
-              return (
-                <div key={ti} style={{ border:`1px solid ${hasData?"#27ae60":"#1a3a5c"}`, borderRadius:10, padding:"8px 10px", marginBottom:8 }}>
-                  <div style={{ color: hasData?"#2ecc71":"#4a7fa5", fontSize:11, fontWeight:800, marginBottom:6 }}>Truck #{ti+1}{ti===2?" (leftover / extra)":""}</div>
-                  <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:8 }}>
-                    <div><div style={lblS}>Truck No.</div>
-                      <input value={t.no} onChange={e=>setT("no",e.target.value)} placeholder="4 digits" inputMode="numeric" style={inpS}/></div>
-                    <div><div style={lblS}>Ticket No.</div>
-                      <input value={t.ticket} onChange={e=>setT("ticket",e.target.value)} placeholder="6 digits" inputMode="numeric" style={inpS}/></div>
-                    <div><div style={lblS}>Cum. Qty (CY)</div>
-                      <input value={t.qty} type="number" onChange={e=>setT("qty",e.target.value)} placeholder="e.g. 9" style={inpS}/></div>
-                    <div><div style={lblS}>Batch Time</div>
-                      <input value={t.batch} type="time" onChange={e=>setT("batch",e.target.value)} style={{...inpS, colorScheme:"dark"}}/></div>
-                  </div>
-                </div>
-              );
-            })}
-          </div>
+          <TrucksSection pile={pile} onUpdate={onUpdate}/>
 
           {phase === "grouting" && (
             <button onClick={finishGrouting} style={{ width:"100%", padding:"18px 0", borderRadius:14, border:"none", cursor:"pointer", background:"#27ae60", color:"#fff", fontSize:18, fontWeight:900 }}>
@@ -1384,109 +1420,110 @@ function PileDetailsForm({ pile, onUpdate }) {
 }
 
 // ── Pile Panel ────────────────────────────────────────────────────────────────
-function PilePanel({ pile, index, onUpdate, onRemove, isDupNo }) {
+// Pile settings modal — pile type, recording interval, grout spacing, and the
+// Not Installed toggle. Shared by the pile detail page header.
+function PileSettingsModal({ pile, index, onUpdate, onClose }) {
   const phase = pile.groutEnd?"complete":pile.groutStart?"grouting":pile.drillEnd?"grouting-ready":pile.drillStart?"drilling":"setup";
-  const [tab, setTab] = useState("log");
-  const [editFoot, setEditFoot] = useState(null); // edit drill feet after completion
-  const [editSecsPad, setEditSecsPad] = useState(false); // numpad overlay for seconds in edit modal
-  const [showFillSecs, setShowFillSecs] = useState(false);
-  const [showSettings, setShowSettings] = useState(false);
-  const [redistributeMode, setRedistributeMode] = useState(false);
-  const [redistributeSel, setRedistributeSel] = useState([]); // array of foot numbers selected
-  const [collapsed, setCollapsed] = useState(phase === "complete");
-  const prevPhase = useRef(phase);
-  // Auto-collapse the panel the moment a pile completes, so finished piles
-  // shrink to a compact bar and the active pile stays easy to reach.
-  useEffect(() => {
-    if (prevPhase.current !== "complete" && phase === "complete") setCollapsed(true);
-    prevPhase.current = phase;
-  }, [phase]);
-
-  const phaseColor={setup:"#1a3a5c",drilling:"#1a5c2e",["grouting-ready"]:"#5c2d91",grouting:"#5c2d91",complete:"#0d2a1a"};
   // Settings (recording interval, ACIP/RI) can only be changed before
   // drilling starts — changing mid-pile would corrupt the depth math.
   const settingsLocked = phase !== "setup";
+  return (
+    <div style={{ position:"fixed", top:0, left:0, width:"100vw", height:"100dvh", background:"rgba(0,0,0,0.8)", zIndex:300, display:"flex", alignItems:"center", justifyContent:"center", padding:20 }} onClick={onClose}>
+      <div style={{ background:"#132536", borderRadius:18, padding:22, maxWidth:340, width:"100%" }} onClick={e=>e.stopPropagation()}>
+        <div style={{ color:"#fff", fontWeight:900, fontSize:17, marginBottom:4 }}>⚙️ Pile #{index+1} Settings</div>
+        {settingsLocked ? (
+          <div style={{ color:"#f0c040", fontSize:12, marginBottom:16 }}>Pile type & grout spacing lock once drilling starts. Recording interval can still be switched mid-pile (e.g. drop to 1ft near a depth that isn't a multiple of 5).</div>
+        ) : (
+          <div style={{ color:"#a8c0d9", fontSize:12, marginBottom:16 }}>Applies to this pile. Carries forward to the next new pile automatically.</div>
+        )}
+
+        <div style={{ color:"#a8c0d9", fontSize:12, fontWeight:700, marginBottom:6 }}>Pile Type</div>
+        <div style={{ display:"flex", gap:8, marginBottom:16 }}>
+          {[["ACIP","Augercast (reinforced)"],["RI","Rigid Inclusion (unreinforced)"]].map(([k,label])=>(
+            <button key={k} disabled={settingsLocked} onClick={()=>onUpdate({...pile,pileKind:k})} style={{
+              flex:1, padding:"10px 6px", borderRadius:10, border: pile.pileKind===k ? "2px solid #2ecc71" : "1px solid #2d4a5c",
+              background: pile.pileKind===k ? "#1a4a2e" : "#0d2236", color:"#fff", fontSize:12, fontWeight:700,
+              cursor: settingsLocked ? "default" : "pointer", opacity: settingsLocked ? 0.6 : 1
+            }}>{label}</button>
+          ))}
+        </div>
+
+        <div style={{ color:"#a8c0d9", fontSize:12, fontWeight:700, marginBottom:6 }}>Record seconds/torque every <span style={{color:"#2ecc71",fontWeight:400}}>(switchable mid-pile)</span></div>
+        <div style={{ display:"flex", gap:8, marginBottom:16 }}>
+          {[[1,"1 ft (standard)"],[5,"5 ft (reduced)"]].map(([n,label])=>(
+            <button key={n} onClick={()=>onUpdate({...pile,footInterval:n})} style={{
+              flex:1, padding:"10px 6px", borderRadius:10, border: pile.footInterval===n ? "2px solid #2ecc71" : "1px solid #2d4a5c",
+              background: pile.footInterval===n ? "#1a4a2e" : "#0d2236", color:"#fff", fontSize:12, fontWeight:700,
+              cursor:"pointer"
+            }}>{label}</button>
+          ))}
+        </div>
+
+        <div style={{ color:"#a8c0d9", fontSize:12, fontWeight:700, marginBottom:6 }}>Grout band spacing</div>
+        <div style={{ display:"flex", gap:8, marginBottom:20 }}>
+          {[[5,"Every 5 ft (standard)"],[10,"Every 10 ft (reduced)"]].map(([n,label])=>(
+            <button key={n} disabled={settingsLocked} onClick={()=>onUpdate({...pile,groutInterval:n})} style={{
+              flex:1, padding:"10px 6px", borderRadius:10, border: pile.groutInterval===n ? "2px solid #2ecc71" : "1px solid #2d4a5c",
+              background: pile.groutInterval===n ? "#1a4a2e" : "#0d2236", color:"#fff", fontSize:12, fontWeight:700,
+              cursor: settingsLocked ? "default" : "pointer", opacity: settingsLocked ? 0.6 : 1
+            }}>{label}</button>
+          ))}
+        </div>
+
+        <div style={{ color:"#a8c0d9", fontSize:12, fontWeight:700, marginBottom:6 }}>Installation status</div>
+        <button onClick={()=>onUpdate({...pile,notInstalled:!pile.notInstalled})} style={{
+          width:"100%", padding:"10px 6px", borderRadius:10, marginBottom:20,
+          border: pile.notInstalled ? "2px solid #e74c3c" : "1px solid #2d4a5c",
+          background: pile.notInstalled ? "#4a1510" : "#0d2236", color: pile.notInstalled ? "#e74c3c" : "#fff",
+          fontSize:12, fontWeight:700, cursor:"pointer"
+        }}>
+          {pile.notInstalled ? "⛔ NOT INSTALLED — will show in summary (tap to undo)" : "Mark as Not Installed (pile to be redrilled)"}
+        </button>
+
+        <button onClick={onClose} style={{ width:"100%", padding:13, borderRadius:10, border:"none", background:"#27ae60", color:"#fff", fontSize:15, fontWeight:800, cursor:"pointer" }}>Done</button>
+      </div>
+    </div>
+  );
+}
+
+// PilePanel is now pure content for the dedicated pile page — header, nav,
+// settings gear, and delete all live in PileDetailPage instead.
+function PilePanel({ pile, index, onUpdate }) {
+  const phase = pile.groutEnd?"complete":pile.groutStart?"grouting":pile.drillEnd?"grouting-ready":pile.drillStart?"drilling":"setup";
+  const [tab, setTab] = useState("log");
+  const [editFoot, setEditFoot] = useState(null); // edit drill feet after completion
+  const [showFillSecs, setShowFillSecs] = useState(false);
+  const [redistributeMode, setRedistributeMode] = useState(false);
+  // Toggling redistribute mode inserts an instructional line above the foot
+  // list, which shifts the page layout and pushes the row the user was
+  // looking at off screen. Capture scroll position before the toggle and
+  // restore it right after, so the list stays put under their thumb.
+  const scrollYRef = useRef(0);
+  const toggleRedistribute = () => {
+    scrollYRef.current = window.scrollY;
+    setRedistributeMode(m => !m);
+    setRedistributeSel([]);
+  };
+  useLayoutEffect(() => { window.scrollTo(0, scrollYRef.current); }, [redistributeMode]);
+  const [redistributeSel, setRedistributeSel] = useState([]); // array of foot numbers selected
+  // Completed sections (drilling / grouting) start collapsed on a finished
+  // pile so the page opens short — tap to expand either one.
+  const [drillOpen, setDrillOpen] = useState(phase !== "complete");
+  const [groutOpen, setGroutOpen] = useState(phase !== "complete");
+  const prevPhase = useRef(phase);
+  // Auto-collapse the moment a pile completes mid-session (the useState
+  // initial value above only applies on mount, so this catches the
+  // transition when it happens without navigating away and back).
+  useEffect(() => {
+    if (prevPhase.current !== "complete" && phase === "complete") {
+      setDrillOpen(false);
+      setGroutOpen(false);
+    }
+    prevPhase.current = phase;
+  }, [phase]);
 
   return (
-    <div style={{background:"#132536",borderRadius:14,boxShadow:"0 2px 14px rgba(0,0,0,0.3)",overflow:"hidden",marginBottom:14}}>
-      <div onClick={()=>setCollapsed(c=>!c)} style={{background:phaseColor[phase],padding:"11px 14px",display:"flex",alignItems:"center",gap:10,cursor:"pointer"}}>
-        <span style={{color:"#fff",fontWeight:900,fontSize:15}}>Pile #{index+1}</span>
-        <input value={pile.pileNo} onClick={e=>e.stopPropagation()} onChange={e=>onUpdate({...pile,pileNo:e.target.value})} placeholder="No."
-          style={{padding:"5px 8px",borderRadius:6,border:"none",fontSize:16,fontWeight:700,width:72}}/>
-        <span style={{color:"#a8c0d9",fontSize:11}}>
-          {{setup:"Setup",drilling:"🔩 Drilling",["grouting-ready"]:"Ready to Grout",grouting:"💉 Grouting",complete:"✓ Done"}[phase]}
-        </span>
-        {collapsed && phase==="complete" && (
-          <span style={{color:"#4a7fa5",fontSize:11}}>{depthFt(pile)} ft · {pile.drillStart}–{pile.groutEnd}</span>
-        )}
-        {pile.pileKind==="RI"&&<span style={{background:"#2d6a4f",color:"#fff",fontSize:10,fontWeight:700,padding:"2px 6px",borderRadius:6}}>RI</span>}
-        {pile.notInstalled&&<span style={{background:"#c0392b",color:"#fff",fontSize:10,fontWeight:700,padding:"2px 6px",borderRadius:6}}>⛔ NOT INSTALLED</span>}
-        {isDupNo&&<span style={{background:"#b7791f",color:"#fff",fontSize:11,fontWeight:700,padding:"2px 7px",borderRadius:6}}>⚠ Duplicate No.</span>}
-        {pile.refusalDepth&&<span style={{background:"#c0392b",color:"#fff",fontSize:11,fontWeight:700,padding:"2px 7px",borderRadius:6}}>⛔ {pile.refusalDepth}ft</span>}
-        <span style={{marginLeft:"auto",color:"#a8c0d9",fontSize:13}}>{collapsed?"▼":"▲"}</span>
-        <button onClick={e=>{e.stopPropagation();setShowSettings(true);}} title="Pile settings" style={{background:"rgba(255,255,255,0.15)",border:"none",color:"#fff",borderRadius:6,padding:"3px 7px",cursor:"pointer",fontSize:13}}>⚙️</button>
-        {onRemove&&<button onClick={e=>{e.stopPropagation();onRemove();}} style={{background:"#922b21",border:"none",color:"#fff",borderRadius:6,padding:"2px 8px",cursor:"pointer",fontSize:12}}>✕</button>}
-      </div>
-
-      {showSettings && (
-        <div style={{ position:"fixed", top:0, left:0, width:"100vw", height:"100dvh", background:"rgba(0,0,0,0.8)", zIndex:300, display:"flex", alignItems:"center", justifyContent:"center", padding:20 }} onClick={()=>setShowSettings(false)}>
-          <div style={{ background:"#132536", borderRadius:18, padding:22, maxWidth:340, width:"100%" }} onClick={e=>e.stopPropagation()}>
-            <div style={{ color:"#fff", fontWeight:900, fontSize:17, marginBottom:4 }}>⚙️ Pile #{index+1} Settings</div>
-            {settingsLocked ? (
-              <div style={{ color:"#f0c040", fontSize:12, marginBottom:16 }}>Pile type & grout spacing lock once drilling starts. Recording interval can still be switched mid-pile (e.g. drop to 1ft near a depth that isn't a multiple of 5).</div>
-            ) : (
-              <div style={{ color:"#a8c0d9", fontSize:12, marginBottom:16 }}>Applies to this pile. Carries forward to the next new pile automatically.</div>
-            )}
-
-            <div style={{ color:"#a8c0d9", fontSize:12, fontWeight:700, marginBottom:6 }}>Pile Type</div>
-            <div style={{ display:"flex", gap:8, marginBottom:16 }}>
-              {[["ACIP","Augercast (reinforced)"],["RI","Rigid Inclusion (unreinforced)"]].map(([k,label])=>(
-                <button key={k} disabled={settingsLocked} onClick={()=>onUpdate({...pile,pileKind:k})} style={{
-                  flex:1, padding:"10px 6px", borderRadius:10, border: pile.pileKind===k ? "2px solid #2ecc71" : "1px solid #2d4a5c",
-                  background: pile.pileKind===k ? "#1a4a2e" : "#0d2236", color:"#fff", fontSize:12, fontWeight:700,
-                  cursor: settingsLocked ? "default" : "pointer", opacity: settingsLocked ? 0.6 : 1
-                }}>{label}</button>
-              ))}
-            </div>
-
-            <div style={{ color:"#a8c0d9", fontSize:12, fontWeight:700, marginBottom:6 }}>Record seconds/torque every <span style={{color:"#2ecc71",fontWeight:400}}>(switchable mid-pile)</span></div>
-            <div style={{ display:"flex", gap:8, marginBottom:16 }}>
-              {[[1,"1 ft (standard)"],[5,"5 ft (reduced)"]].map(([n,label])=>(
-                <button key={n} onClick={()=>onUpdate({...pile,footInterval:n})} style={{
-                  flex:1, padding:"10px 6px", borderRadius:10, border: pile.footInterval===n ? "2px solid #2ecc71" : "1px solid #2d4a5c",
-                  background: pile.footInterval===n ? "#1a4a2e" : "#0d2236", color:"#fff", fontSize:12, fontWeight:700,
-                  cursor:"pointer"
-                }}>{label}</button>
-              ))}
-            </div>
-
-            <div style={{ color:"#a8c0d9", fontSize:12, fontWeight:700, marginBottom:6 }}>Grout band spacing</div>
-            <div style={{ display:"flex", gap:8, marginBottom:20 }}>
-              {[[5,"Every 5 ft (standard)"],[10,"Every 10 ft (reduced)"]].map(([n,label])=>(
-                <button key={n} disabled={settingsLocked} onClick={()=>onUpdate({...pile,groutInterval:n})} style={{
-                  flex:1, padding:"10px 6px", borderRadius:10, border: pile.groutInterval===n ? "2px solid #2ecc71" : "1px solid #2d4a5c",
-                  background: pile.groutInterval===n ? "#1a4a2e" : "#0d2236", color:"#fff", fontSize:12, fontWeight:700,
-                  cursor: settingsLocked ? "default" : "pointer", opacity: settingsLocked ? 0.6 : 1
-                }}>{label}</button>
-              ))}
-            </div>
-
-            <div style={{ color:"#a8c0d9", fontSize:12, fontWeight:700, marginBottom:6 }}>Installation status</div>
-            <button onClick={()=>onUpdate({...pile,notInstalled:!pile.notInstalled})} style={{
-              width:"100%", padding:"10px 6px", borderRadius:10, marginBottom:20,
-              border: pile.notInstalled ? "2px solid #e74c3c" : "1px solid #2d4a5c",
-              background: pile.notInstalled ? "#4a1510" : "#0d2236", color: pile.notInstalled ? "#e74c3c" : "#fff",
-              fontSize:12, fontWeight:700, cursor:"pointer"
-            }}>
-              {pile.notInstalled ? "⛔ NOT INSTALLED — will show in summary (tap to undo)" : "Mark as Not Installed (pile to be redrilled)"}
-            </button>
-
-            <button onClick={()=>setShowSettings(false)} style={{ width:"100%", padding:13, borderRadius:10, border:"none", background:"#27ae60", color:"#fff", fontSize:15, fontWeight:800, cursor:"pointer" }}>Done</button>
-          </div>
-        </div>
-      )}
-
-      {!collapsed && (<>
+    <div>
       {/* Times strip */}
       {(pile.drillStart||pile.drillEnd||pile.groutStart||pile.groutEnd)&&(
         <div style={{background:"#071520",display:"flex",flexWrap:"wrap"}}>
@@ -1525,18 +1562,19 @@ function PilePanel({ pile, index, onUpdate, onRemove, isDupNo }) {
                   </div>
                 </div>
 
-                {/* Drill log — full, editable even after completion */}
+                {/* Drill log — full, editable even after completion; collapses by default */}
                 <div style={{background:"#071520",borderRadius:12,padding:"10px 12px"}}>
-                  <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:6,flexWrap:"wrap",gap:6}}>
-                    <span style={{color:"#4a7fa5",fontSize:11,fontWeight:700}}>🔩 Drill log — {depthFt(pile)} ft</span>
+                  <div onClick={()=>setDrillOpen(o=>!o)} style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom: drillOpen?6:0,flexWrap:"wrap",gap:6,cursor:"pointer"}}>
+                    <span style={{color:"#4a7fa5",fontSize:11,fontWeight:700}}>🔩 Drill log — {depthFt(pile)} ft {drillOpen?"▲":"▼"}</span>
+                    {drillOpen && (
                     <div style={{display:"flex",gap:6}}>
                       {missingFeet(pile).length>0 && !redistributeMode && (
-                        <button onClick={()=>setShowFillSecs(true)} style={{background:"#7a5c00",border:"1px solid #f0c040",borderRadius:8,color:"#ffd700",fontSize:12,fontWeight:800,padding:"6px 12px",cursor:"pointer"}}>
+                        <button onClick={(e)=>{e.stopPropagation();setShowFillSecs(true);}} style={{background:"#7a5c00",border:"1px solid #f0c040",borderRadius:8,color:"#ffd700",fontSize:12,fontWeight:800,padding:"6px 12px",cursor:"pointer"}}>
                           ⏱ Fill missing seconds ({missingFeet(pile).length})
                         </button>
                       )}
                       {(pile.feet||[]).length>1 && (
-                        <button onClick={()=>{ setRedistributeMode(m=>!m); setRedistributeSel([]); }} style={{
+                        <button onClick={(e)=>{e.stopPropagation();toggleRedistribute();}} style={{
                           background: redistributeMode ? "#5c2d91" : "transparent", border:"1px solid #8e44ad", borderRadius:8,
                           color: redistributeMode ? "#fff" : "#c39bd3", fontSize:12, fontWeight:800, padding:"6px 12px", cursor:"pointer"
                         }}>
@@ -1544,7 +1582,9 @@ function PilePanel({ pile, index, onUpdate, onRemove, isDupNo }) {
                         </button>
                       )}
                     </div>
+                    )}
                   </div>
+                  {drillOpen && (<>
                   {redistributeMode && (
                     <div style={{color:"#c39bd3",fontSize:11,marginBottom:8,lineHeight:1.4}}>
                       Select a run of consecutive feet below, then split their combined seconds evenly. Use this if the stopwatch got tapped late or early on some taps but the drilling was actually steady.
@@ -1666,10 +1706,16 @@ function PilePanel({ pile, index, onUpdate, onRemove, isDupNo }) {
                     + Add Foot ({depthFt(pile)+1}ft)
                   </button>
                   )}
+                  </>)}
                 </div>
 
-                {/* Grout log — reuse grout screen in done state (band grid, slurry/grout, trucks) */}
-                <GroutScreen pile={pile} onUpdate={onUpdate}/>
+                {/* Grout log — reuse grout screen in done state (band grid, slurry/grout, trucks); collapses by default */}
+                <div style={{background:"#071520",borderRadius:12,padding:"10px 12px"}}>
+                  <div onClick={()=>setGroutOpen(o=>!o)} style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom: groutOpen?6:0,cursor:"pointer"}}>
+                    <span style={{color:"#4a7fa5",fontSize:11,fontWeight:700}}>💉 Grouting — bands, trucks, notes {groutOpen?"▲":"▼"}</span>
+                  </div>
+                  {groutOpen && <GroutScreen pile={pile} onUpdate={onUpdate}/>}
+                </div>
 
                 {showFillSecs && (
                   <FillSecondsModal pile={pile} onUpdate={onUpdate} onClose={()=>setShowFillSecs(false)}/>
@@ -1677,51 +1723,7 @@ function PilePanel({ pile, index, onUpdate, onRemove, isDupNo }) {
 
                 {/* Edit foot modal (post-completion) */}
                 {editFoot && (
-                  <div style={{ position:"fixed", top:0, left:0, width:"100vw", height:"100dvh", background:"rgba(0,0,0,0.75)", zIndex:300, display:"flex", alignItems:"center", justifyContent:"center", padding:16 }}>
-                    <div style={{ background:"#132536", borderRadius:18, padding:22, width:"100%", maxWidth:360 }}>
-                      <div style={{ color:"#fff", fontWeight:900, fontSize:17, marginBottom:16 }}>Edit {(pile.footInterval||1)>1 ? `Depth ${editFoot.foot}ft` : `Foot ${editFoot.foot}`}</div>
-                      <div style={{ color:"#a8c0d9", fontSize:12, fontWeight:700, marginBottom:4 }}>Seconds</div>
-                      <div onClick={() => setEditSecsPad(true)}
-                        style={{ width:"100%", padding:"12px", borderRadius:8, border:"1px solid #2d4a5c", background:"#071520", color: editFoot.seconds!=null ? "#fff" : "#4a7fa5", fontSize:20, fontWeight:800, boxSizing:"border-box", marginBottom:12, cursor:"pointer", display:"flex", justifyContent:"space-between", alignItems:"center" }}>
-                        <span>{editFoot.seconds!=null ? `${editFoot.seconds}s` : "tap to enter"}</span>
-                        <span style={{ fontSize:13, color:"#4a7fa5" }}>⌨ numpad</span>
-                      </div>
-                      {editSecsPad && (
-                        <Numpad
-                          label={`Seconds at ${editFoot.foot}ft`}
-                          initialValue={editFoot.seconds!=null ? String(editFoot.seconds) : ""}
-                          onConfirm={(v) => { setEditFoot(f=>({...f, seconds: v==="" ? null : Number(v)})); setEditSecsPad(false); }}
-                          onCancel={() => setEditSecsPad(false)}
-                        />
-                      )}
-                      <div style={{ color:"#a8c0d9", fontSize:12, fontWeight:700, marginBottom:4 }}>KNm Torque (blank = none)</div>
-                      <input type="number" value={editFoot.knm || ""} onChange={e => setEditFoot(f=>({...f, knm: e.target.value}))}
-                        style={{ width:"100%", padding:"10px 12px", borderRadius:8, border:"1px solid #2d4a5c", background:"#071520", color:"#fff", fontSize:18, fontWeight:700, boxSizing:"border-box", marginBottom:16 }}/>
-                      {(() => {
-                        const allFeet = pile.feet || [];
-                        const idx = allFeet.findIndex(f => f.foot === editFoot.foot);
-                        const atFirst = idx <= 0, atLast = idx === -1 || idx >= allFeet.length - 1;
-                        const saveAndGo = (targetIdx) => {
-                          const newFeet = pile.feet.map((f,i) => i === idx ? editFoot : f);
-                          onUpdate({ ...pile, feet: newFeet });
-                          if (targetIdx != null && newFeet[targetIdx]) setEditFoot({ ...newFeet[targetIdx] });
-                          else setEditFoot(null);
-                        };
-                        return (
-                          <div style={{ display:"flex", gap:8, marginBottom:8 }}>
-                            <button disabled={atFirst} onClick={()=>saveAndGo(idx-1)}
-                              style={{ flex:1, padding:12, borderRadius:10, border:"1px solid #2d4a5c", background: atFirst ? "#0a1a29" : "#0d2236", color: atFirst ? "#2d4a5c" : "#a8c0d9", fontSize:14, cursor: atFirst ? "default" : "pointer", fontWeight:700 }}
-                            >◀ Prev</button>
-                            <button onClick={()=>saveAndGo(null)} style={{ flex:1.4, padding:12, borderRadius:10, border:"none", background:"#27ae60", color:"#fff", fontSize:14, cursor:"pointer", fontWeight:800 }}>✓ Done</button>
-                            <button disabled={atLast} onClick={()=>saveAndGo(idx+1)}
-                              style={{ flex:1, padding:12, borderRadius:10, border:"1px solid #2d4a5c", background: atLast ? "#0a1a29" : "#0d2236", color: atLast ? "#2d4a5c" : "#a8c0d9", fontSize:14, cursor: atLast ? "default" : "pointer", fontWeight:700 }}
-                            >Next ▶</button>
-                          </div>
-                        );
-                      })()}
-                      <button onClick={()=>setEditFoot(null)} style={{ width:"100%", padding:10, borderRadius:10, border:"none", background:"transparent", color:"#6a8caf", fontSize:12, cursor:"pointer" }}>Cancel without saving this foot</button>
-                    </div>
-                  </div>
+                  <FootEditModal pile={pile} foot={editFoot} feetList={pile.feet||[]} onUpdate={onUpdate} onClose={() => setEditFoot(null)} />
                 )}
               </div>
             )}
@@ -1729,7 +1731,6 @@ function PilePanel({ pile, index, onUpdate, onRemove, isDupNo }) {
         )}
         {tab==="details"&&<PileDetailsForm pile={pile} onUpdate={onUpdate}/>}
       </div>
-      </>)}
     </div>
   );
 }
@@ -1760,6 +1761,109 @@ function ProjectForm({ project, onChange }) {
 }
 
 // ── App ───────────────────────────────────────────────────────────────────────
+// ── Pile List Page (compact rows — tap to open the dedicated pile page) ────────
+function PileListPage({ piles, project, onOpen, onAdd, onRemove }) {
+  const phaseOf = (pile) => pile.groutEnd?"complete":pile.groutStart?"grouting":pile.drillEnd?"grouting-ready":pile.drillStart?"drilling":"setup";
+  const phaseColor={setup:"#1a3a5c",drilling:"#1a5c2e",["grouting-ready"]:"#5c2d91",grouting:"#5c2d91",complete:"#0d2a1a"};
+  const phaseLabel={setup:"Setup",drilling:"🔩 Drilling",["grouting-ready"]:"Ready to Grout",grouting:"💉 Grouting",complete:"✓ Done"};
+
+  return (
+    <div>
+      {piles.map((pile, i) => {
+        const phase = phaseOf(pile);
+        const isDupNo = !!pile.pileNo && piles.filter(x=>x.pileNo&&x.pileNo.trim()===pile.pileNo.trim()).length>1;
+        const derived = phase==="complete" ? calcDerived(pile, project) : null;
+        const gfLow = derived && derived.groutFactor && parseFloat(derived.groutFactor) < 1;
+        return (
+          <div key={pile.id} onClick={()=>onOpen(pile.id)} style={{
+            background:"#132536", borderRadius:14, boxShadow:"0 2px 14px rgba(0,0,0,0.3)",
+            marginBottom:10, cursor:"pointer", overflow:"hidden", borderLeft:`5px solid ${phaseColor[phase]==="#132536"?"#1a3a5c":phaseColor[phase]}`
+          }}>
+            <div style={{ padding:"13px 14px", display:"flex", alignItems:"center", gap:10, flexWrap:"wrap" }}>
+              <span style={{color:"#fff",fontWeight:900,fontSize:15}}>#{i+1}</span>
+              <span style={{color:"#fff",fontWeight:800,fontSize:15}}>{pile.pileNo || "(no number)"}</span>
+              <span style={{color:"#a8c0d9",fontSize:11,background:"#0d2236",padding:"3px 8px",borderRadius:6}}>{phaseLabel[phase]}</span>
+              {phase!=="setup" && <span style={{color:"#4a7fa5",fontSize:12}}>{depthFt(pile)} ft</span>}
+              {derived && derived.groutFactor && (
+                <span style={{color: gfLow ? "#e74c3c" : "#2ecc71", fontSize:12, fontWeight:700}}>GF {derived.groutFactor}</span>
+              )}
+              {pile.pileKind==="RI"&&<span style={{background:"#2d6a4f",color:"#fff",fontSize:10,fontWeight:700,padding:"2px 6px",borderRadius:6}}>RI</span>}
+              {pile.notInstalled&&<span style={{background:"#c0392b",color:"#fff",fontSize:10,fontWeight:700,padding:"2px 6px",borderRadius:6}}>⛔ NOT INSTALLED</span>}
+              {isDupNo&&<span style={{background:"#b7791f",color:"#fff",fontSize:10,fontWeight:700,padding:"2px 6px",borderRadius:6}}>⚠ Dup No.</span>}
+              {pile.refusalDepth&&<span style={{background:"#c0392b",color:"#fff",fontSize:10,fontWeight:700,padding:"2px 6px",borderRadius:6}}>⛔ {pile.refusalDepth}ft</span>}
+              <span style={{marginLeft:"auto",display:"flex",alignItems:"center",gap:8}}>
+                {onRemove && (
+                  <button onClick={e=>{e.stopPropagation();onRemove(pile.id);}} style={{background:"#922b21",border:"none",color:"#fff",borderRadius:6,padding:"4px 9px",cursor:"pointer",fontSize:12}}>✕</button>
+                )}
+                <span style={{color:"#4a7fa5",fontSize:16}}>›</span>
+              </span>
+            </div>
+          </div>
+        );
+      })}
+      <button onClick={onAdd} style={{width:"100%",padding:16,borderRadius:12,border:"2px dashed #2d6a9f",background:"transparent",color:"#4a7fa5",fontWeight:700,fontSize:14,cursor:"pointer"}}>
+        + New Pile
+      </button>
+    </div>
+  );
+}
+
+// ── Pile Detail Page (dedicated page for one pile, with Prev/Next nav) ─────────
+function PileDetailPage({ piles, pileId, onUpdate, onRemove, onBack, onNavigate }) {
+  const idx = piles.findIndex(p => p.id === pileId);
+  const pile = piles[idx];
+  const [showSettings, setShowSettings] = useState(false);
+  if (!pile) return null;
+
+  const phase = pile.groutEnd?"complete":pile.groutStart?"grouting":pile.drillEnd?"grouting-ready":pile.drillStart?"drilling":"setup";
+  const phaseColor={setup:"#1a3a5c",drilling:"#1a5c2e",["grouting-ready"]:"#5c2d91",grouting:"#5c2d91",complete:"#0d2a1a"};
+  const phaseLabel={setup:"Setup",drilling:"🔩 Drilling",["grouting-ready"]:"Ready to Grout",grouting:"💉 Grouting",complete:"✓ Done"};
+  const isDupNo = !!pile.pileNo && piles.filter(x=>x.pileNo&&x.pileNo.trim()===pile.pileNo.trim()).length>1;
+  const atFirst = idx <= 0, atLast = idx >= piles.length-1;
+
+  return (
+    <div>
+      {/* Back / Prev / Next */}
+      <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:8,flexWrap:"wrap"}}>
+        <button onClick={onBack} style={{padding:"8px 12px",borderRadius:8,border:"1px solid #2d4a5c",background:"transparent",color:"#a8c0d9",fontSize:13,cursor:"pointer",fontWeight:700}}>← All Piles</button>
+        <button disabled={atFirst} onClick={()=>onNavigate(piles[idx-1].id)} style={{padding:"8px 12px",borderRadius:8,border:"1px solid #2d4a5c",background: atFirst?"#0a1a29":"#132536",color: atFirst?"#2d4a5c":"#a8c0d9",fontSize:13,cursor: atFirst?"default":"pointer",fontWeight:700}}>◀ Prev</button>
+        <button disabled={atLast} onClick={()=>onNavigate(piles[idx+1].id)} style={{padding:"8px 12px",borderRadius:8,border:"1px solid #2d4a5c",background: atLast?"#0a1a29":"#132536",color: atLast?"#2d4a5c":"#a8c0d9",fontSize:13,cursor: atLast?"default":"pointer",fontWeight:700}}>Next ▶</button>
+      </div>
+
+      {/* Quick-jump pile tab strip */}
+      {piles.length>1 && (
+        <div style={{display:"flex",gap:6,overflowX:"auto",paddingBottom:8,marginBottom:8}}>
+          {piles.map((p,i)=>(
+            <button key={p.id} onClick={()=>onNavigate(p.id)} style={{
+              flexShrink:0,padding:"7px 12px",borderRadius:8,border: p.id===pileId?"2px solid #4fc3f7":"1px solid #1a3a5c",
+              background: p.id===pileId?"#1a3a5c":"#132536",color: p.id===pileId?"#fff":"#4a7fa5",fontSize:12,fontWeight:p.id===pileId?800:400,cursor:"pointer",whiteSpace:"nowrap"
+            }}>#{i+1}{p.pileNo?` ${p.pileNo}`:""}</button>
+          ))}
+        </div>
+      )}
+
+      <div style={{background:"#132536",borderRadius:14,boxShadow:"0 2px 14px rgba(0,0,0,0.3)",overflow:"hidden"}}>
+        <div style={{background:phaseColor[phase],padding:"11px 14px",display:"flex",alignItems:"center",gap:10,flexWrap:"wrap"}}>
+          <span style={{color:"#fff",fontWeight:900,fontSize:15}}>Pile #{idx+1}</span>
+          <input value={pile.pileNo} onChange={e=>onUpdate({...pile,pileNo:e.target.value})} placeholder="No."
+            style={{padding:"5px 8px",borderRadius:6,border:"none",fontSize:16,fontWeight:700,width:72}}/>
+          <span style={{color:"#a8c0d9",fontSize:11}}>{phaseLabel[phase]}</span>
+          {pile.pileKind==="RI"&&<span style={{background:"#2d6a4f",color:"#fff",fontSize:10,fontWeight:700,padding:"2px 6px",borderRadius:6}}>RI</span>}
+          {pile.notInstalled&&<span style={{background:"#c0392b",color:"#fff",fontSize:10,fontWeight:700,padding:"2px 6px",borderRadius:6}}>⛔ NOT INSTALLED</span>}
+          {isDupNo&&<span style={{background:"#b7791f",color:"#fff",fontSize:11,fontWeight:700,padding:"2px 7px",borderRadius:6}}>⚠ Duplicate No.</span>}
+          {pile.refusalDepth&&<span style={{background:"#c0392b",color:"#fff",fontSize:11,fontWeight:700,padding:"2px 7px",borderRadius:6}}>⛔ {pile.refusalDepth}ft</span>}
+          <span style={{marginLeft:"auto",display:"flex",gap:8}}>
+            <button onClick={()=>setShowSettings(true)} title="Pile settings" style={{background:"rgba(255,255,255,0.15)",border:"none",color:"#fff",borderRadius:6,padding:"5px 9px",cursor:"pointer",fontSize:14}}>⚙️</button>
+            <button onClick={()=>onRemove(pile.id)} style={{background:"#922b21",border:"none",color:"#fff",borderRadius:6,padding:"5px 10px",cursor:"pointer",fontSize:13}}>✕</button>
+          </span>
+        </div>
+        {showSettings && <PileSettingsModal pile={pile} index={idx} onUpdate={onUpdate} onClose={()=>setShowSettings(false)}/>}
+        <PilePanel key={pile.id} pile={pile} index={idx} onUpdate={onUpdate}/>
+      </div>
+    </div>
+  );
+}
+
 function App() {
   // ── Multi-project store: projects[] each with own info + piles ──
   // Migrates the old single-project storage automatically on first load.
@@ -1823,8 +1927,9 @@ function App() {
     const entry = normalizeEntry({ id: Date.now(), project: emptyProject() });
     setStore(s => ({ projects: [...s.projects, entry], activeId: entry.id }));
     setShowProject(true);
+    setOpenPileId(null);
   };
-  const switchProject = (id) => setStore(s => ({ ...s, activeId: id }));
+  const switchProject = (id) => { setStore(s => ({ ...s, activeId: id })); setOpenPileId(null); };
   const deleteProject = (id) => {
     if (!window.confirm("Delete this project and ALL its days & piles? Make sure you've downloaded its PDFs first.")) return;
     if (!window.confirm("Are you sure? This cannot be undone.")) return;
@@ -1833,6 +1938,7 @@ function App() {
       const projects = remaining.length ? remaining : [normalizeEntry({ id: Date.now(), project: emptyProject() })];
       return { projects, activeId: projects[0].id };
     });
+    setOpenPileId(null);
   };
 
   // ── Day management ──
@@ -1841,8 +1947,9 @@ function App() {
     const lastPile = activeDay.piles[activeDay.piles.length-1];
     const day = freshDay(inheritedPile(lastPile));
     setStore(s => ({ ...s, projects: s.projects.map(e => e.id !== active.id ? e : { ...e, days: [...e.days, day], activeDayId: day.id }) }));
+    setOpenPileId(null);
   };
-  const switchDay = (id) => setStore(s => ({ ...s, projects: s.projects.map(e => e.id !== active.id ? e : { ...e, activeDayId: id }) }));
+  const switchDay = (id) => { setStore(s => ({ ...s, projects: s.projects.map(e => e.id !== active.id ? e : { ...e, activeDayId: id }) })); setOpenPileId(null); };
   const deleteDay = (id) => {
     const d = active.days.find(x => x.id === id);
     if (!window.confirm(`Delete the ${d?.date||""} day and its ${d?.piles.length||0} pile(s)? Make sure you've downloaded that day's PDF first.`)) return;
@@ -1858,6 +1965,8 @@ function App() {
   const [showProject, setShowProject] = useState(true);
   const [sunMode, setSunMode] = useState(false);
   const [importError, setImportError] = useState("");
+  const [openPileId, setOpenPileId] = useState(null); // which pile is showing as a dedicated page (null = list view)
+  const [showAppSettings, setShowAppSettings] = useState(false); // app-level settings modal (Export/Import)
 
   // Export all data as JSON file for backup/transfer to new hosting
   const handleExport = () => {
@@ -1946,9 +2055,10 @@ function App() {
   };
 
   const addPile=()=>{
-    setPiles(p=>[...p, inheritedPile(p[p.length-1])]);
+    const np = inheritedPile(piles[piles.length-1]);
+    setPiles(p=>[...p, np]);
     setShowProject(false);
-    setTimeout(()=>window.scrollTo({top:document.body.scrollHeight,behavior:"smooth"}),100);
+    setOpenPileId(np.id); // jump straight into the new pile's page
   };
   const removePile=(id)=>{
     const p = piles.find(x=>x.id===id);
@@ -1956,6 +2066,7 @@ function App() {
     const hasData = p && (p.drillStart || (p.feet&&p.feet.length));
     if (!window.confirm(`Delete ${label}${hasData?" and its ENTIRE log":""}? This cannot be undone.`)) return;
     setPiles(pl=>pl.filter(x=>x.id!==id));
+    if (openPileId === id) setOpenPileId(null); // back out to the list if the open pile was deleted
   };
   const updatePile=(id,u)=>setPiles(p=>p.map(x=>x.id===id?u:x));
 
@@ -2016,17 +2127,27 @@ function App() {
         <div style={{display:"flex",gap:8}}>
           <button onClick={()=>setSunMode(s=>!s)} style={{padding:"7px 11px",borderRadius:7,border:"1px solid #2d4a5c",cursor:"pointer",background:sunMode?"#ffd700":"transparent",color:sunMode?"#333":"#a8c0d9",fontSize:12,fontWeight:700}}>{sunMode?"🌙":"☀️"}</button>
           <button onClick={()=>setShowProject(s=>!s)} style={{padding:"7px 11px",borderRadius:7,border:"1px solid #2d4a5c",cursor:"pointer",background:"transparent",color:"#a8c0d9",fontSize:12}}>📋 Project</button>
-          <button onClick={addPile} style={{padding:"7px 11px",borderRadius:7,border:"none",cursor:"pointer",background:"#2d6a9f",color:"#fff",fontWeight:700,fontSize:12}}>+ Pile</button>
           <button onClick={handleSummary} disabled={generating} style={{padding:"7px 11px",borderRadius:7,border:"1px solid #e67e22",cursor:"pointer",background:"transparent",color:"#e6a35c",fontWeight:700,fontSize:12}}>
             {generating?"…":"📑 Summary"}
           </button>
           <button onClick={handlePDF} disabled={generating} style={{padding:"7px 11px",borderRadius:7,border:"none",cursor:"pointer",background:generating?"#444":"#e67e22",color:"#fff",fontWeight:700,fontSize:12}}>
             {generating?"…":"📄 PDF"}
           </button>
-          <button onClick={handleExport} title="Backup all data to file" style={{padding:"7px 11px",borderRadius:7,border:"1px solid #4a7fa5",cursor:"pointer",background:"transparent",color:"#4a7fa5",fontWeight:700,fontSize:12}}>💾 Export</button>
-          <button onClick={handleImport} title="Restore from backup file" style={{padding:"7px 11px",borderRadius:7,border:"1px solid #2ecc71",cursor:"pointer",background:"transparent",color:"#2ecc71",fontWeight:700,fontSize:12}}>📂 Import</button>
+          <button onClick={()=>setShowAppSettings(true)} style={{padding:"7px 11px",borderRadius:7,border:"1px solid #2d4a5c",cursor:"pointer",background:"transparent",color:"#a8c0d9",fontSize:12}}>⚙️ Settings</button>
         </div>
       </div>
+
+      {showAppSettings && (
+        <div style={{ position:"fixed", top:0, left:0, width:"100vw", height:"100dvh", background:"rgba(0,0,0,0.8)", zIndex:300, display:"flex", alignItems:"center", justifyContent:"center", padding:20 }} onClick={()=>setShowAppSettings(false)}>
+          <div style={{ background:"#132536", borderRadius:18, padding:22, maxWidth:340, width:"100%" }} onClick={e=>e.stopPropagation()}>
+            <div style={{ color:"#fff", fontWeight:900, fontSize:17, marginBottom:16 }}>⚙️ App Settings</div>
+            <div style={{ color:"#a8c0d9", fontSize:12, fontWeight:700, marginBottom:6 }}>Data backup</div>
+            <button onClick={handleExport} style={{width:"100%",padding:"12px 6px",borderRadius:10,border:"1px solid #4a7fa5",background:"transparent",color:"#4a7fa5",fontWeight:700,fontSize:13,cursor:"pointer",marginBottom:8}}>💾 Export all data to file</button>
+            <button onClick={handleImport} style={{width:"100%",padding:"12px 6px",borderRadius:10,border:"1px solid #2ecc71",background:"transparent",color:"#2ecc71",fontWeight:700,fontSize:13,cursor:"pointer",marginBottom:20}}>📂 Import from backup file</button>
+            <button onClick={()=>setShowAppSettings(false)} style={{ width:"100%", padding:13, borderRadius:10, border:"none", background:"#27ae60", color:"#fff", fontSize:15, fontWeight:800, cursor:"pointer" }}>Done</button>
+          </div>
+        </div>
+      )}
 
       <div style={{maxWidth:680,margin:"0 auto",padding:"12px 10px 60px"}}>
         {/* ── Project switcher ── */}
@@ -2074,14 +2195,24 @@ function App() {
         </div>
 
         {showProject&&<ProjectForm project={project} onChange={setProject}/>}
-        {piles.map((pile,i)=>(
-          <PilePanel key={pile.id} pile={pile} index={i} isDupNo={!!pile.pileNo && piles.filter(x=>x.pileNo&&x.pileNo.trim()===pile.pileNo.trim()).length>1}
-            onUpdate={u=>updatePile(pile.id,u)}
-            onRemove={piles.length>1?()=>removePile(pile.id):null}/>
-        ))}
-        <button onClick={addPile} style={{width:"100%",padding:14,borderRadius:12,border:"2px dashed #2d6a9f",background:"transparent",color:"#4a7fa5",fontWeight:700,fontSize:14,cursor:"pointer"}}>
-          + Add Another Pile
-        </button>
+        {openPileId ? (
+          <PileDetailPage
+            piles={piles}
+            pileId={openPileId}
+            onUpdate={u=>updatePile(openPileId,u)}
+            onRemove={removePile}
+            onBack={()=>setOpenPileId(null)}
+            onNavigate={setOpenPileId}
+          />
+        ) : (
+          <PileListPage
+            piles={piles}
+            project={project}
+            onOpen={setOpenPileId}
+            onAdd={addPile}
+            onRemove={piles.length>1?removePile:null}
+          />
+        )}
       </div>
 
       {/* ── PDF Viewer Modal ── */}
