@@ -41,6 +41,29 @@ const depthFt = (pile) => {
   return 0;
 };
 
+// Repair corrupted foot depths. A bug in an earlier build's Prev/Next
+// navigation could overwrite a foot's record with its neighbor's, producing
+// duplicate depths (e.g. 2ft, 2ft, 3ft). Depths must be strictly increasing,
+// so walk backward from the end: whenever an entry's depth is >= the next
+// one's, renumber it to (next depth − local spacing), where local spacing is
+// taken from the nearest valid gap ahead (falls back to the pile's recording
+// interval). Data after the corrupted rows is untouched.
+const repairFeet = (pile) => {
+  const feet = pile.feet || [];
+  if (feet.length < 2) return pile;
+  let dirty = false;
+  const fixed = feet.map(f => ({ ...f }));
+  for (let i = fixed.length - 2; i >= 0; i--) {
+    if (fixed[i].foot >= fixed[i+1].foot) {
+      const gapAhead = (i + 2 < fixed.length) ? (fixed[i+2].foot - fixed[i+1].foot) : 0;
+      const gap = gapAhead > 0 ? gapAhead : (pile.footInterval || 1);
+      fixed[i].foot = fixed[i+1].foot - gap;
+      dirty = true;
+    }
+  }
+  return dirty ? { ...pile, feet: fixed } : pile;
+};
+
 // Snap the page to top and lock body scroll while a fixed-position modal is
 // open — iOS Safari anchors position:fixed to the layout viewport, which can
 // sit below the visible area if the page was scrolled when the modal opened.
@@ -343,16 +366,26 @@ function FillSecondsModal({ pile, onUpdate, onClose }) {
 // on open so it always renders centered in the visible viewport.
 function FootEditModal({ pile, foot, feetList, onUpdate, onClose }) {
   const [local, setLocal] = useState(foot);
+  // Track the position being edited in STATE — deriving it from the `foot`
+  // prop was a serious bug: the prop never changes during Prev/Next
+  // navigation, so every save landed on the original row, overwriting
+  // neighboring feet with each other's records (duplicate depths like
+  // 2ft/2ft). curIdx moves with the navigation; saves land where the user
+  // actually is.
+  const [curIdx, setCurIdx] = useState(() => feetList.findIndex(f => f.foot === foot.foot));
   const [editing, setEditing] = useState(null); // null | "seconds" | "knm"
   useModalScrollLock(true);
 
-  const idx = feetList.findIndex(f => f.foot === foot.foot);
-  const atFirst = idx <= 0, atLast = idx === -1 || idx >= feetList.length - 1;
+  const atFirst = curIdx <= 0, atLast = curIdx === -1 || curIdx >= (pile.feet||[]).length - 1;
 
   const saveAndGo = (targetIdx) => {
-    const newFeet = pile.feet.map((f,i) => i === idx ? local : f);
+    const newFeet = pile.feet.map((f,i) => i === curIdx ? local : f);
     onUpdate({ ...pile, feet: newFeet });
-    if (targetIdx != null && newFeet[targetIdx]) { setLocal({ ...newFeet[targetIdx] }); setEditing(null); }
+    if (targetIdx != null && newFeet[targetIdx]) {
+      setLocal({ ...newFeet[targetIdx] });
+      setCurIdx(targetIdx);
+      setEditing(null);
+    }
     else onClose();
   };
 
@@ -397,11 +430,11 @@ function FootEditModal({ pile, foot, feetList, onUpdate, onClose }) {
         </div>
 
         <div style={{ display:"flex", gap:8, marginBottom:8 }}>
-          <button disabled={atFirst} onClick={() => saveAndGo(idx - 1)}
+          <button disabled={atFirst} onClick={() => saveAndGo(curIdx - 1)}
             style={{ flex:1, padding:12, borderRadius:10, border:"1px solid #2d4a5c", background: atFirst ? "#0a1a29" : "#0d2236", color: atFirst ? "#2d4a5c" : "#a8c0d9", fontSize:14, cursor: atFirst ? "default" : "pointer", fontWeight:700 }}
           >◀ Prev</button>
           <button onClick={() => saveAndGo(null)} style={{ flex:1.4, padding:12, borderRadius:10, border:"none", background:"#27ae60", color:"#fff", fontSize:14, cursor:"pointer", fontWeight:800 }}>✓ Done</button>
-          <button disabled={atLast} onClick={() => saveAndGo(idx + 1)}
+          <button disabled={atLast} onClick={() => saveAndGo(curIdx + 1)}
             style={{ flex:1, padding:12, borderRadius:10, border:"1px solid #2d4a5c", background: atLast ? "#0a1a29" : "#0d2236", color: atLast ? "#2d4a5c" : "#a8c0d9", fontSize:14, cursor: atLast ? "default" : "pointer", fontWeight:700 }}
           >Next ▶</button>
         </div>
@@ -1494,17 +1527,29 @@ function PilePanel({ pile, index, onUpdate }) {
   const [editFoot, setEditFoot] = useState(null); // edit drill feet after completion
   const [showFillSecs, setShowFillSecs] = useState(false);
   const [redistributeMode, setRedistributeMode] = useState(false);
-  // Toggling redistribute mode inserts an instructional line above the foot
-  // list, which shifts the page layout and pushes the row the user was
-  // looking at off screen. Capture scroll position before the toggle and
-  // restore it right after, so the list stays put under their thumb.
+  // Toggling redistribute mode re-renders the foot rows (different row style
+  // and heights), which resets the INNER scrollable foot list back to the
+  // top — that list has its own scrollbox (maxHeight 260), so preserving
+  // window.scrollY alone wasn't enough. Capture both the window position and
+  // the inner list's scrollTop before the toggle and restore them right
+  // after, so the feet the user was looking at stay put.
+  const footListRef = useRef(null);
   const scrollYRef = useRef(0);
+  const footListScrollRef = useRef(0);
+  const pendingRestoreRef = useRef(false);
   const toggleRedistribute = () => {
     scrollYRef.current = window.scrollY;
+    footListScrollRef.current = footListRef.current ? footListRef.current.scrollTop : 0;
+    pendingRestoreRef.current = true;
     setRedistributeMode(m => !m);
     setRedistributeSel([]);
   };
-  useLayoutEffect(() => { window.scrollTo(0, scrollYRef.current); }, [redistributeMode]);
+  useLayoutEffect(() => {
+    if (!pendingRestoreRef.current) return; // don't scroll-jump on mount
+    pendingRestoreRef.current = false;
+    window.scrollTo(0, scrollYRef.current);
+    if (footListRef.current) footListRef.current.scrollTop = footListScrollRef.current;
+  }, [redistributeMode]);
   const [redistributeSel, setRedistributeSel] = useState([]); // array of foot numbers selected
   // Completed sections (drilling / grouting) start collapsed on a finished
   // pile so the page opens short — tap to expand either one.
@@ -1590,7 +1635,7 @@ function PilePanel({ pile, index, onUpdate }) {
                       Select a run of consecutive feet below, then split their combined seconds evenly. Use this if the stopwatch got tapped late or early on some taps but the drilling was actually steady.
                     </div>
                   )}
-                  <div style={{maxHeight:260,overflowY:"auto"}}>
+                  <div ref={footListRef} style={{maxHeight:260,overflowY:"auto"}}>
                     {(pile.feet||[]).map((f,fi)=>{
                       const hi=f.knm&&parseInt(f.knm)>75;
                       const selected = redistributeSel.includes(f.foot);
@@ -1878,8 +1923,10 @@ function App() {
 
   // Normalize any older store shape (projects without days) into project→days→piles
   const normalizeEntry = (e) => {
-    if (Array.isArray(e.days) && e.days.length) return e;
-    const day = { id: (e.id||Date.now())+1, date: (e.project&&e.project.date) || new Date().toLocaleDateString("en-US"), piles: (Array.isArray(e.piles)&&e.piles.length)?e.piles:[emptyPile()] };
+    // Repair any feet corrupted by the old Prev/Next overwrite bug on load
+    const fixDays = (days) => days.map(d => ({ ...d, piles: (d.piles||[]).map(repairFeet) }));
+    if (Array.isArray(e.days) && e.days.length) return { ...e, days: fixDays(e.days) };
+    const day = { id: (e.id||Date.now())+1, date: (e.project&&e.project.date) || new Date().toLocaleDateString("en-US"), piles: (Array.isArray(e.piles)&&e.piles.length)?e.piles.map(repairFeet):[emptyPile()] };
     return { id: e.id, project: e.project||emptyProject(), days: [day], activeDayId: day.id };
   };
 
