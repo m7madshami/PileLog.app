@@ -2228,6 +2228,7 @@ function App() {
           <button onClick={handlePDF} disabled={generating} style={{padding:"8px 13px",borderRadius:7,border:"none",cursor:"pointer",background:generating?"#444":"#e67e22",color:"#fff",fontWeight:700,fontSize:13}}>
             {generating?"…":"📄 PDF"}
           </button>
+          <button onClick={()=>setSunMode(s=>!s)} style={{padding:"8px 13px",borderRadius:7,border:"1px solid #2d4a5c",cursor:"pointer",background:sunMode?"#ffd700":"transparent",color:sunMode?"#333":"#a8c0d9",fontSize:13,fontWeight:700}}>{sunMode?"🌙":"☀️"}</button>
           <button onClick={()=>setShowMenu(true)} style={{padding:"8px 13px",borderRadius:7,border:"1px solid #2d4a5c",cursor:"pointer",background:"transparent",color:"#fff",fontSize:15,fontWeight:800}}>☰ Menu</button>
         </div>
       </div>
