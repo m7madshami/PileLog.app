@@ -301,6 +301,55 @@ function Numpad({ label, initialValue, onConfirm, onCancel }) {
 // ── Fill Missing Seconds — fast backfill for arrived-late / zero-second feet ──
 const missingFeet = (pile) => (pile.feet||[]).filter(f => f.seconds == null || f.seconds === 0).map(f => f.foot);
 
+// ── Minimum-strokes check ─────────────────────────────────────────────────────
+// While grouting, each 5-ft lift must place at least the theoretical volume of
+// that span × 1.15 (target grout factor) — or × 1.0 once grout return has been
+// observed. Theoretical volume per span = π r² × span; strokes = volume ÷ pump
+// calibration factor. Band stroke entries are cumulative counter readings, so
+// the strokes placed over a span = this band's reading − the deeper band's.
+const dayProjectInfo = () => {
+  try {
+    const s = JSON.parse(localStorage.getItem("acip_store"));
+    const act = s.projects.find(e=>e.id===s.activeId) || s.projects[0];
+    const day = act.days.find(d=>d.id===act.activeDayId) || act.days[act.days.length-1];
+    return (day && day.projectInfo) || act.project || {};
+  } catch(e) { return {}; }
+};
+const minStrokesForSpan = (pile, span, afterReturn) => {
+  const dia = parseFloat(pile.pileDiameter);
+  const calib = parseFloat(dayProjectInfo().pumpCalibFactor);
+  if (!dia || !calib || !span) return null;
+  return PI_LANGAN * Math.pow(dia/24, 2) * span * (afterReturn ? 1 : 1.15) / calib;
+};
+// Bands whose placed strokes fall below the minimum for their span.
+const lowStrokeBands = (pile) => {
+  const bands = pile.groutBands || [];
+  const out = [];
+  for (let i = 1; i < bands.length; i++) {
+    const deeper = bands[i-1], b = bands[i];
+    if (deeper.strokes === "" || deeper.strokes == null || b.strokes === "" || b.strokes == null) continue;
+    const span = deeper.depth - b.depth;
+    if (span <= 0) continue;
+    const afterReturn = pile.groutAt != null && pile.groutAt !== "" && b.depth <= parseFloat(pile.groutAt);
+    const minS = minStrokesForSpan(pile, span, afterReturn);
+    if (minS == null) continue;
+    const delta = parseFloat(b.strokes) - parseFloat(deeper.strokes);
+    if (delta < minS) out.push({ depth: b.depth, delta, min: Math.ceil(minS) });
+  }
+  return out;
+};
+
+// ── Per-pile issue summary — drives the ⚠ indicators on collapsed sections,
+// pile tabs, and the pile list, so logs needing review are visible at a glance.
+const pileIssues = (pile) => {
+  const missSec = pile.drillEnd ? missingFeet(pile).length : 0;
+  const groutActive = !!pile.groutStart;
+  const missBands = groutActive ? (pile.groutBands||[]).filter(b => b.strokes === "" || b.strokes == null).length : 0;
+  const low = groutActive ? lowStrokeBands(pile).length : 0;
+  const trucksEmpty = (pile.groutEnd && !(pile.trucks||[]).some(t => t.no||t.ticket||t.qty||t.batch)) ? 1 : 0;
+  return { missSec, missBands, low, trucksEmpty, total: missSec + missBands + low + trucksEmpty };
+};
+
 function FillSecondsModal({ pile, onUpdate, onClose }) {
   const [currentFoot, setCurrentFoot] = useState(() => missingFeet(pile)[0] ?? null);
   const [val, setVal] = useState("");
@@ -779,28 +828,57 @@ function GroutScreen({ pile, onUpdate }) {
             Strokes going up — bottom to surface ({filled}/{bands.length} entered)
           </div>
 
-          {/* Band grid */}
-          <div style={{ display:"grid", gridTemplateColumns:"repeat(3,1fr)", gap:8 }}>
-            {bands.map((b, i) => {
-              const isBottom = i === 0;
-              const done = !!b.strokes;
-              return (
-                <button key={b.depth} onClick={() => (phase==="grouting"||phase==="done") && setNumpadBand(b.depth)} style={{
-                  padding:"14px 6px", borderRadius:12,
-                  border:`2px solid ${done ? "#27ae60" : isBottom ? "#e67e22" : "#2d6a9f"}`,
-                  background: done ? "#1a4a2e" : isBottom ? "#3d2200" : "#1a3a5c",
-                  color:"#fff", cursor: phase==="grouting"?"pointer":"default", textAlign:"center"
-                }}>
-                  <div style={{ fontSize:11, color: done?"#a8d9b8" : isBottom?"#f0a060":"#a8c0d9", fontWeight:700 }}>
-                    {isBottom ? "⬇ BOTTOM" : b.label}
-                  </div>
-                  <div style={{ fontSize:24, fontWeight:900, color: done?"#2ecc71" : isBottom?"#e67e22":"#4fc3f7", marginTop:2 }}>
-                    {b.strokes || "—"}
-                  </div>
-                </button>
-              );
-            })}
-          </div>
+          {/* ── Minimum-strokes target (GF ≥ 1.15) — live heads-up while pumping ── */}
+          {(() => {
+            const span = pile.groutInterval || 5;
+            const before = minStrokesForSpan(pile, span, false);
+            const after = minStrokesForSpan(pile, span, true);
+            if (before == null) return (
+              <div style={{ background:"#1a2f42", borderRadius:10, padding:"8px 12px", color:"#4a7fa5", fontSize:11 }}>
+                Enter Pile Diameter and Pump Calibration to see minimum strokes per band.
+              </div>
+            );
+            return (
+              <div style={{ background:"#1a2f42", border:"1px solid #2d6a9f", borderRadius:10, padding:"9px 12px" }}>
+                <div style={{ color:"#4fc3f7", fontSize:12, fontWeight:800 }}>
+                  🎯 Min strokes per {span}ft band: ≥ {Math.ceil(before)} <span style={{color:"#a8c0d9",fontWeight:400}}>before grout return</span> · ≥ {Math.ceil(after)} <span style={{color:"#a8c0d9",fontWeight:400}}>after</span>
+                </div>
+                <div style={{ color:"#4a7fa5", fontSize:10, marginTop:2 }}>π r² × {span}ft × 1.15 ÷ calibration — bands short of this turn red below</div>
+              </div>
+            );
+          })()}
+
+          {/* Band grid — low-stroke bands (below the GF 1.15 minimum) turn red */}
+          {(() => {
+            const lows = lowStrokeBands(pile);
+            const lowMap = {};
+            lows.forEach(l => { lowMap[l.depth] = l; });
+            return (
+              <div style={{ display:"grid", gridTemplateColumns:"repeat(3,1fr)", gap:8 }}>
+                {bands.map((b, i) => {
+                  const isBottom = i === 0;
+                  const done = !!b.strokes;
+                  const low = lowMap[b.depth];
+                  return (
+                    <button key={b.depth} onClick={() => (phase==="grouting"||phase==="done") && setNumpadBand(b.depth)} style={{
+                      padding:"14px 6px", borderRadius:12,
+                      border:`2px solid ${low ? "#e74c3c" : done ? "#27ae60" : isBottom ? "#e67e22" : "#2d6a9f"}`,
+                      background: low ? "#4a1510" : done ? "#1a4a2e" : isBottom ? "#3d2200" : "#1a3a5c",
+                      color:"#fff", cursor: phase==="grouting"?"pointer":"default", textAlign:"center"
+                    }}>
+                      <div style={{ fontSize:11, color: low?"#e74c3c" : done?"#a8d9b8" : isBottom?"#f0a060":"#a8c0d9", fontWeight:700 }}>
+                        {isBottom ? "⬇ BOTTOM" : b.label}
+                      </div>
+                      <div style={{ fontSize:24, fontWeight:900, color: low?"#e74c3c" : done?"#2ecc71" : isBottom?"#e67e22":"#4fc3f7", marginTop:2 }}>
+                        {b.strokes || "—"}
+                      </div>
+                      {low && <div style={{ fontSize:10, color:"#e74c3c", fontWeight:800 }}>▼ {low.delta} of ≥{low.min}</div>}
+                    </button>
+                  );
+                })}
+              </div>
+            );
+          })()}
 
           {/* Slurry / Grout return observed */}
           <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:8 }}>
@@ -891,7 +969,18 @@ function GroutScreen({ pile, onUpdate }) {
 
       {numpadBand !== null && (
         <Numpad
-          label={`Strokes at ${bands.find(b=>b.depth===numpadBand)?.label||numpadBand}`}
+          label={(() => {
+            const base = `Strokes at ${bands.find(b=>b.depth===numpadBand)?.label||numpadBand}`;
+            const i = bands.findIndex(b=>b.depth===numpadBand);
+            if (i <= 0) return base;
+            const deeper = bands[i-1];
+            if (deeper.strokes === "" || deeper.strokes == null) return base;
+            const span = deeper.depth - bands[i].depth;
+            const afterReturn = pile.groutAt != null && pile.groutAt !== "" && bands[i].depth <= parseFloat(pile.groutAt);
+            const minS = minStrokesForSpan(pile, span, afterReturn);
+            if (minS == null) return base;
+            return `${base} — min ${Math.ceil(parseFloat(deeper.strokes) + minS)}`;
+          })()}
           initialValue={bands.find(b=>b.depth===numpadBand)?.strokes||""}
           onConfirm={saveBandStrokes}
           onCancel={() => setNumpadBand(null)}
@@ -1495,12 +1584,20 @@ function PileSettingsModal({ pile, index, onUpdate, onClose }) {
 }
 
 // ── Collapsible section with a clear, large header (Drill/Grout/Trucks/Notes) ─
-function Section({ icon, title, open, onToggle, children }) {
+function Section({ icon, title, open, onToggle, badge, badgeColor, children }) {
   return (
     <div style={{background:"#0d2236",borderRadius:12,overflow:"hidden",border:"1px solid #1a3a5c"}}>
       <div onClick={onToggle} style={{display:"flex",alignItems:"center",gap:10,padding:"13px 14px",cursor:"pointer",background:"#12283d"}}>
         <span style={{fontSize:17}}>{icon}</span>
         <span style={{color:"#fff",fontSize:15,fontWeight:800,flex:1}}>{title}</span>
+        {badge && (
+          <span style={{
+            background: badgeColor==="red" ? "#4a1510" : "#3d2f00",
+            color: badgeColor==="red" ? "#e74c3c" : "#ffd700",
+            border: `1px solid ${badgeColor==="red" ? "#e74c3c" : "#f0c040"}`,
+            fontSize:11, fontWeight:800, padding:"3px 9px", borderRadius:8, whiteSpace:"nowrap"
+          }}>{badge}</span>
+        )}
         <span style={{color:"#4fc3f7",fontSize:14}}>{open?"▲":"▼"}</span>
       </div>
       {open && <div style={{padding:10}}>{children}</div>}
@@ -1580,6 +1677,8 @@ function PilePanel({ pile, index, onUpdate }) {
     prevPhase.current = phase;
   }, [phase]);
 
+  const issues = pileIssues(pile);
+
   return (
     <div>
       {/* Times strip */}
@@ -1619,7 +1718,7 @@ function PilePanel({ pile, index, onUpdate }) {
             <div style={{display:"flex",flexDirection:"column",gap:12}}>
 
               {/* ── 🔩 DRILLING ── */}
-              <Section icon="🔩" title={`Drilling${(pile.feet||[]).length?` — ${depthFt(pile)} ft`:""}`} open={drillOpen} onToggle={()=>setDrillOpen(o=>!o)}>
+              <Section icon="🔩" title={`Drilling${(pile.feet||[]).length?` — ${depthFt(pile)} ft`:""}`} badge={issues.missSec ? `⚠ ${issues.missSec} sec missing` : null} open={drillOpen} onToggle={()=>setDrillOpen(o=>!o)}>
                 {(phase==="setup"||phase==="drilling") ? (
                   <DrillScreen pile={pile} onUpdate={onUpdate}/>
                 ) : (
@@ -1765,7 +1864,7 @@ function PilePanel({ pile, index, onUpdate }) {
               </Section>
 
               {/* ── 💉 GROUTING ── */}
-              <Section icon="💉" title="Grouting — bands & returns" open={groutOpen} onToggle={()=>setGroutOpen(o=>!o)}>
+              <Section icon="💉" title="Grouting — bands & returns" badge={issues.low ? `▼ ${issues.low} band${issues.low>1?"s":""} low` : issues.missBands ? `⚠ ${issues.missBands} band${issues.missBands>1?"s":""} empty` : null} badgeColor={issues.low ? "red" : undefined} open={groutOpen} onToggle={()=>setGroutOpen(o=>!o)}>
                 {(phase==="setup"||phase==="drilling") ? (
                   <div style={{color:"#4a7fa5",fontSize:13,padding:"4px 2px"}}>Grouting opens after drilling is finished — bands are built from the final drill depth.</div>
                 ) : (
@@ -1774,7 +1873,7 @@ function PilePanel({ pile, index, onUpdate }) {
               </Section>
 
               {/* ── 🚛 TRUCKS — always accessible, any phase ── */}
-              <Section icon="🚛" title="Grout Trucks" open={trucksOpen} onToggle={()=>setTrucksOpen(o=>!o)}>
+              <Section icon="🚛" title="Grout Trucks" badge={issues.trucksEmpty ? "⚠ empty" : null} open={trucksOpen} onToggle={()=>setTrucksOpen(o=>!o)}>
                 <TrucksSection pile={pile} onUpdate={onUpdate}/>
               </Section>
 
@@ -1861,6 +1960,7 @@ function PileListPage({ piles, project, onOpen, onAdd, onRemove }) {
               {pile.pileKind==="RI"&&<span style={{background:"#2d6a4f",color:"#fff",fontSize:10,fontWeight:700,padding:"2px 6px",borderRadius:6}}>RI</span>}
               {pile.notInstalled&&<span style={{background:"#c0392b",color:"#fff",fontSize:10,fontWeight:700,padding:"2px 6px",borderRadius:6}}>⛔ NOT INSTALLED</span>}
               {isDupNo&&<span style={{background:"#b7791f",color:"#fff",fontSize:10,fontWeight:700,padding:"2px 6px",borderRadius:6}}>⚠ Dup No.</span>}
+              {(()=>{const t=pileIssues(pile).total; return t>0 ? <span style={{background:"#3d2f00",color:"#ffd700",border:"1px solid #f0c040",fontSize:10,fontWeight:800,padding:"2px 7px",borderRadius:6}}>⚠ {t} to review</span> : null;})()}
               {pile.refusalDepth&&<span style={{background:"#c0392b",color:"#fff",fontSize:10,fontWeight:700,padding:"2px 6px",borderRadius:6}}>⛔ {pile.refusalDepth}ft</span>}
               <span style={{marginLeft:"auto",display:"flex",alignItems:"center",gap:8}}>
                 {onRemove && (
@@ -1908,7 +2008,7 @@ function PileDetailPage({ piles, pileId, onUpdate, onRemove, onBack, onNavigate,
           <button key={p.id} onClick={()=>onNavigate(p.id)} style={{
             flexShrink:0,padding:"7px 12px",borderRadius:8,border: p.id===pileId?"2px solid #4fc3f7":"1px solid #1a3a5c",
             background: p.id===pileId?"#1a3a5c":"#132536",color: p.id===pileId?"#fff":"#4a7fa5",fontSize:12,fontWeight:p.id===pileId?800:400,cursor:"pointer",whiteSpace:"nowrap"
-          }}>#{i+1}{p.pileNo?` ${p.pileNo}`:""}</button>
+          }}>#{i+1}{p.pileNo?` ${p.pileNo}`:""}{pileIssues(p).total>0 && <span style={{color:"#f0c040",marginLeft:4}}>⚠</span>}</button>
         ))}
         {onAdd && (
           <button onClick={onAdd} style={{
