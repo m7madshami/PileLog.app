@@ -315,28 +315,53 @@ const dayProjectInfo = () => {
     return (day && day.projectInfo) || act.project || {};
   } catch(e) { return {}; }
 };
-const minStrokesForSpan = (pile, span, afterReturn) => {
+// Running grout-factor tracker. Per the PM: a single low 5-ft interval is NOT
+// a problem if the next makes up for it — what matters is the running AVERAGE
+// and whether the pile is on track to finish at an overall grout factor of at
+// least 1.15. This is guidance, not a per-interval alarm.
+// Stroke entries are cumulative counter readings; the bottom band's reading is
+// the baseline (handles counters that don't start at zero).
+const groutProgress = (pile) => {
   const dia = parseFloat(pile.pileDiameter);
   const calib = parseFloat(dayProjectInfo().pumpCalibFactor);
-  if (!dia || !calib || !span) return null;
-  return PI_LANGAN * Math.pow(dia/24, 2) * span * (afterReturn ? 1 : 1.15) / calib;
-};
-// Bands whose placed strokes fall below the minimum for their span.
-const lowStrokeBands = (pile) => {
   const bands = pile.groutBands || [];
-  const out = [];
-  for (let i = 1; i < bands.length; i++) {
-    const deeper = bands[i-1], b = bands[i];
-    if (deeper.strokes === "" || deeper.strokes == null || b.strokes === "" || b.strokes == null) continue;
-    const span = deeper.depth - b.depth;
-    if (span <= 0) continue;
-    const afterReturn = pile.groutAt != null && pile.groutAt !== "" && b.depth <= parseFloat(pile.groutAt);
-    const minS = minStrokesForSpan(pile, span, afterReturn);
-    if (minS == null) continue;
-    const delta = parseFloat(b.strokes) - parseFloat(deeper.strokes);
-    if (delta < minS) out.push({ depth: b.depth, delta, min: Math.ceil(minS) });
-  }
+  if (!dia || !calib || bands.length < 2) return null;
+  const r2 = Math.pow(dia/24, 2);
+  const bottomDepth = bands[0].depth;
+  const totalVol = PI_LANGAN * r2 * bottomDepth;               // full pile theoretical (ft³)
+  const targetFinalStrokes = totalVol * 1.15 / calib;          // strokes above baseline needed for GF 1.15
+  const base = parseFloat(bands[0].strokes);
+  let lastFilled = -1;
+  for (let i = 0; i < bands.length; i++) if (bands[i].strokes !== "" && bands[i].strokes != null) lastFilled = i;
+  const out = {
+    targetFinal: Math.ceil(targetFinalStrokes + (isNaN(base) ? 0 : base)),
+    runningGF: null, onTrack: null, remBands: null, needPerBand: null, finished: false
+  };
+  if (isNaN(base) || lastFilled < 1) return out;
+  const cur = parseFloat(bands[lastFilled].strokes) - base;    // strokes placed so far
+  const coveredVol = PI_LANGAN * r2 * (bottomDepth - bands[lastFilled].depth);
+  if (coveredVol <= 0) return out;
+  out.runningGF = (cur * calib) / coveredVol;
+  out.onTrack = out.runningGF >= 1.15;
+  out.remBands = bands.length - 1 - lastFilled;
+  out.finished = out.remBands === 0;
+  const needMore = Math.max(0, targetFinalStrokes - cur);
+  out.needPerBand = out.remBands > 0 ? Math.ceil(needMore / out.remBands) : null;
+  out.curReading = parseFloat(bands[lastFilled].strokes);
   return out;
+};
+// Cumulative pace target at a given band depth — the counter reading that keeps
+// the running average at 1.15 by that point. Guidance for the numpad hint.
+const paceTargetAt = (pile, depth) => {
+  const dia = parseFloat(pile.pileDiameter);
+  const calib = parseFloat(dayProjectInfo().pumpCalibFactor);
+  const bands = pile.groutBands || [];
+  if (!dia || !calib || !bands.length) return null;
+  const base = parseFloat(bands[0].strokes);
+  if (isNaN(base)) return null;
+  const vol = PI_LANGAN * Math.pow(dia/24, 2) * (bands[0].depth - depth);
+  if (vol <= 0) return null;
+  return Math.ceil(base + vol * 1.15 / calib);
 };
 
 // ── Per-pile issue summary — drives the ⚠ indicators on collapsed sections,
@@ -345,7 +370,13 @@ const pileIssues = (pile) => {
   const missSec = pile.drillEnd ? missingFeet(pile).length : 0;
   const groutActive = !!pile.groutStart;
   const missBands = groutActive ? (pile.groutBands||[]).filter(b => b.strokes === "" || b.strokes == null).length : 0;
-  const low = groutActive ? lowStrokeBands(pile).length : 0;
+  // Only flag grout factor once the pile is COMPLETE and the overall average
+  // is below 1.15 — a single low interval mid-pile is not an issue.
+  let low = 0;
+  if (pile.groutEnd) {
+    const gp = groutProgress(pile);
+    if (gp && gp.finished && gp.runningGF != null && gp.runningGF < 1.15) low = 1;
+  }
   const trucksEmpty = (pile.groutEnd && !(pile.trucks||[]).some(t => t.no||t.ticket||t.qty||t.batch)) ? 1 : 0;
   return { missSec, missBands, low, trucksEmpty, total: missSec + missBands + low + trucksEmpty };
 };
@@ -828,57 +859,63 @@ function GroutScreen({ pile, onUpdate }) {
             Strokes going up — bottom to surface ({filled}/{bands.length} entered)
           </div>
 
-          {/* ── Minimum-strokes target (GF ≥ 1.15) — live heads-up while pumping ── */}
+          {/* ── Running grout-factor tracker (GF ≥ 1.15 overall) — average-based
+              guidance: one low interval is fine if the next makes up for it ── */}
           {(() => {
-            const span = pile.groutInterval || 5;
-            const before = minStrokesForSpan(pile, span, false);
-            const after = minStrokesForSpan(pile, span, true);
-            if (before == null) return (
+            const gp = groutProgress(pile);
+            if (!gp) return (
               <div style={{ background:"#1a2f42", borderRadius:10, padding:"8px 12px", color:"#4a7fa5", fontSize:11 }}>
-                Enter Pile Diameter and Pump Calibration to see minimum strokes per band.
+                Enter Pile Diameter and Pump Calibration to see live grout-factor tracking.
               </div>
             );
+            const gfTxt = gp.runningGF != null ? gp.runningGF.toFixed(2) : null;
+            const good = gp.onTrack;
             return (
-              <div style={{ background:"#1a2f42", border:"1px solid #2d6a9f", borderRadius:10, padding:"9px 12px" }}>
-                <div style={{ color:"#4fc3f7", fontSize:12, fontWeight:800 }}>
-                  🎯 Min strokes per {span}ft band: ≥ {Math.ceil(before)} <span style={{color:"#a8c0d9",fontWeight:400}}>before grout return</span> · ≥ {Math.ceil(after)} <span style={{color:"#a8c0d9",fontWeight:400}}>after</span>
-                </div>
-                <div style={{ color:"#4a7fa5", fontSize:10, marginTop:2 }}>π r² × {span}ft × 1.15 ÷ calibration — bands short of this turn red below</div>
+              <div style={{ background: gfTxt==null ? "#1a2f42" : good ? "#0d2a1a" : "#3d2f00", border:`1px solid ${gfTxt==null ? "#2d6a9f" : good ? "#27ae60" : "#f0c040"}`, borderRadius:10, padding:"9px 12px" }}>
+                {gfTxt == null ? (
+                  <div style={{ color:"#4fc3f7", fontSize:12, fontWeight:800 }}>
+                    🎯 Target at surface: ≥ {gp.targetFinal} total strokes (overall GF 1.15)
+                  </div>
+                ) : gp.finished ? (
+                  <div style={{ color: good ? "#2ecc71" : "#f0c040", fontSize:13, fontWeight:800 }}>
+                    {good ? "✓" : "▼"} Final grout factor: {gfTxt} {good ? "— meets 1.15 target" : "— below 1.15 target"}
+                  </div>
+                ) : (
+                  <>
+                    <div style={{ color: good ? "#2ecc71" : "#f0c040", fontSize:13, fontWeight:800 }}>
+                      {good ? "✓ On track" : "◔ Behind pace"} — running GF so far: {gfTxt}
+                    </div>
+                    <div style={{ color:"#a8c0d9", fontSize:11, marginTop:2 }}>
+                      Finish at ≥ {gp.targetFinal} total strokes{gp.needPerBand != null ? ` · avg ≥ ${gp.needPerBand} per remaining band` : ""}. Average is what counts — a low band can be made up on the next.
+                    </div>
+                  </>
+                )}
               </div>
             );
           })()}
 
-          {/* Band grid — low-stroke bands (below the GF 1.15 minimum) turn red */}
-          {(() => {
-            const lows = lowStrokeBands(pile);
-            const lowMap = {};
-            lows.forEach(l => { lowMap[l.depth] = l; });
-            return (
-              <div style={{ display:"grid", gridTemplateColumns:"repeat(3,1fr)", gap:8 }}>
-                {bands.map((b, i) => {
-                  const isBottom = i === 0;
-                  const done = !!b.strokes;
-                  const low = lowMap[b.depth];
-                  return (
-                    <button key={b.depth} onClick={() => (phase==="grouting"||phase==="done") && setNumpadBand(b.depth)} style={{
-                      padding:"14px 6px", borderRadius:12,
-                      border:`2px solid ${low ? "#e74c3c" : done ? "#27ae60" : isBottom ? "#e67e22" : "#2d6a9f"}`,
-                      background: low ? "#4a1510" : done ? "#1a4a2e" : isBottom ? "#3d2200" : "#1a3a5c",
-                      color:"#fff", cursor: phase==="grouting"?"pointer":"default", textAlign:"center"
-                    }}>
-                      <div style={{ fontSize:11, color: low?"#e74c3c" : done?"#a8d9b8" : isBottom?"#f0a060":"#a8c0d9", fontWeight:700 }}>
-                        {isBottom ? "⬇ BOTTOM" : b.label}
-                      </div>
-                      <div style={{ fontSize:24, fontWeight:900, color: low?"#e74c3c" : done?"#2ecc71" : isBottom?"#e67e22":"#4fc3f7", marginTop:2 }}>
-                        {b.strokes || "—"}
-                      </div>
-                      {low && <div style={{ fontSize:10, color:"#e74c3c", fontWeight:800 }}>▼ {low.delta} of ≥{low.min}</div>}
-                    </button>
-                  );
-                })}
-              </div>
-            );
-          })()}
+          {/* Band grid */}
+          <div style={{ display:"grid", gridTemplateColumns:"repeat(3,1fr)", gap:8 }}>
+            {bands.map((b, i) => {
+              const isBottom = i === 0;
+              const done = !!b.strokes;
+              return (
+                <button key={b.depth} onClick={() => (phase==="grouting"||phase==="done") && setNumpadBand(b.depth)} style={{
+                  padding:"14px 6px", borderRadius:12,
+                  border:`2px solid ${done ? "#27ae60" : isBottom ? "#e67e22" : "#2d6a9f"}`,
+                  background: done ? "#1a4a2e" : isBottom ? "#3d2200" : "#1a3a5c",
+                  color:"#fff", cursor: phase==="grouting"?"pointer":"default", textAlign:"center"
+                }}>
+                  <div style={{ fontSize:11, color: done?"#a8d9b8" : isBottom?"#f0a060":"#a8c0d9", fontWeight:700 }}>
+                    {isBottom ? "⬇ BOTTOM" : b.label}
+                  </div>
+                  <div style={{ fontSize:24, fontWeight:900, color: done?"#2ecc71" : isBottom?"#e67e22":"#4fc3f7", marginTop:2 }}>
+                    {b.strokes || "—"}
+                  </div>
+                </button>
+              );
+            })}
+          </div>
 
           {/* Slurry / Grout return observed */}
           <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:8 }}>
@@ -973,13 +1010,8 @@ function GroutScreen({ pile, onUpdate }) {
             const base = `Strokes at ${bands.find(b=>b.depth===numpadBand)?.label||numpadBand}`;
             const i = bands.findIndex(b=>b.depth===numpadBand);
             if (i <= 0) return base;
-            const deeper = bands[i-1];
-            if (deeper.strokes === "" || deeper.strokes == null) return base;
-            const span = deeper.depth - bands[i].depth;
-            const afterReturn = pile.groutAt != null && pile.groutAt !== "" && bands[i].depth <= parseFloat(pile.groutAt);
-            const minS = minStrokesForSpan(pile, span, afterReturn);
-            if (minS == null) return base;
-            return `${base} — min ${Math.ceil(parseFloat(deeper.strokes) + minS)}`;
+            const pace = paceTargetAt(pile, bands[i].depth);
+            return pace != null ? `${base} — pace ≥ ${pace}` : base;
           })()}
           initialValue={bands.find(b=>b.depth===numpadBand)?.strokes||""}
           onConfirm={saveBandStrokes}
@@ -1864,7 +1896,7 @@ function PilePanel({ pile, index, onUpdate }) {
               </Section>
 
               {/* ── 💉 GROUTING ── */}
-              <Section icon="💉" title="Grouting — bands & returns" badge={issues.low ? `▼ ${issues.low} band${issues.low>1?"s":""} low` : issues.missBands ? `⚠ ${issues.missBands} band${issues.missBands>1?"s":""} empty` : null} badgeColor={issues.low ? "red" : undefined} open={groutOpen} onToggle={()=>setGroutOpen(o=>!o)}>
+              <Section icon="💉" title="Grouting — bands & returns" badge={issues.low ? "▼ GF below 1.15" : issues.missBands ? `⚠ ${issues.missBands} band${issues.missBands>1?"s":""} empty` : null} badgeColor={issues.low ? "red" : undefined} open={groutOpen} onToggle={()=>setGroutOpen(o=>!o)}>
                 {(phase==="setup"||phase==="drilling") ? (
                   <div style={{color:"#4a7fa5",fontSize:13,padding:"4px 2px"}}>Grouting opens after drilling is finished — bands are built from the final drill depth.</div>
                 ) : (
@@ -2305,15 +2337,56 @@ function App() {
     finally{setGenerating(false);}
   };
   const handleSummary=async()=>{
+    // Generates the "Daily Summary of Auger Cast Pile Installation" table as a
+    // Word-openable .doc (HTML), matching the SOR report's columns — open it,
+    // copy the table, paste into the daily field report. (A PDF was the old
+    // output, but tables copied out of PDFs lose their structure in Word.)
     setGenerating(true);
     try{
-      const url = await generateSummaryPDF(projectForPdf,piles);
-      setPdfName(buildPdfFilename("-Summary"));
-      setPdfUrl(url);
-      setPdfPages([]);
-      renderPdfPages(url);
+      const esc = (s) => String(s==null?"":s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
+      const rows = piles.map((pile, i) => {
+        const d = calcDerived(pile, projectForPdf);
+        const remarks = [
+          pile.notInstalled ? "Not Installed — pile redrilled." : "",
+          pile.refusalDepth ? `Refusal at ${pile.refusalDepth} ft.` : "",
+          pile.notes || ""
+        ].filter(Boolean).join(" ");
+        const cells = [
+          i+1,
+          pile.pileNo || `(pile ${i+1})`,
+          activeDay.date,
+          pile.pileDiameter || "",
+          pile.groundElevation || "",
+          pile.notInstalled ? "Not Installed" : (d.drillDepth || ""),
+          d.tipElevation || "",
+          d.cutoffElevation || "",
+          d.pileLength || "",
+          d.actual || "",
+          d.groutFactor || "",
+          pile.reinfSteel || "",
+          remarks
+        ];
+        return "<tr>" + cells.map(v=>`<td style="border:1px solid #000;padding:4px 6px;font-size:9pt;vertical-align:top">${esc(v)}</td>`).join("") + "</tr>";
+      }).join("\n");
+      const headers = ["Number of installed piles","Pile ID","Date of Installation","Pile Diameter (in)","Appx. Ground El. (ft)","Drilled Depth (ft)","Approx Tip El. (ft)","Pile Cut-off El. (ft)","Pile Length (ft)","Grout Vol. (ft\u00B3)","Grout Factor","Reinforcement","Remarks"];
+      const html = `<html xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:w="urn:schemas-microsoft-com:office:word"><head><meta charset="utf-8"><title>Daily Summary</title></head><body>
+<p style="font-weight:bold;text-align:center;font-size:10pt">Table \u2013 Daily Summary of Auger Cast Pile Installation During Production</p>
+<table style="border-collapse:collapse;width:100%">
+<tr>${headers.map(h=>`<th style="border:1px solid #000;padding:4px 6px;font-size:9pt;background:#dce6f1">${h}</th>`).join("")}</tr>
+${rows}
+</table>
+</body></html>`;
+      const blob = new Blob(["\ufeff", html], { type: "application/msword" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = buildPdfFilename("-SummaryTable").replace(/\.pdf$/i, ".doc");
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      setTimeout(()=>URL.revokeObjectURL(url), 30000);
     }
-    catch(e){alert("PDF error: "+e.message);}
+    catch(e){alert("Summary error: "+e.message);}
     finally{setGenerating(false);}
   };
 
@@ -2364,7 +2437,7 @@ function App() {
 
             <div style={{ color:"#4a7fa5", fontSize:11, fontWeight:800, marginBottom:6 }}>ACTIONS</div>
             <button onClick={()=>{setShowProject(s=>!s);setShowMenu(false);}} style={{width:"100%",padding:"11px 12px",borderRadius:10,border:"1px solid #2d4a5c",background:"transparent",color:"#a8c0d9",fontSize:13,fontWeight:700,cursor:"pointer",marginBottom:8,textAlign:"left"}}>📋 Show / hide project info</button>
-            <button onClick={()=>{handleSummary();setShowMenu(false);}} disabled={generating} style={{width:"100%",padding:"11px 12px",borderRadius:10,border:"1px solid #e67e22",background:"transparent",color:"#e6a35c",fontSize:13,fontWeight:700,cursor:"pointer",marginBottom:8,textAlign:"left"}}>📑 Daily summary PDF</button>
+            <button onClick={()=>{handleSummary();setShowMenu(false);}} disabled={generating} style={{width:"100%",padding:"11px 12px",borderRadius:10,border:"1px solid #e67e22",background:"transparent",color:"#e6a35c",fontSize:13,fontWeight:700,cursor:"pointer",marginBottom:8,textAlign:"left"}}>📑 Summary table (Word)</button>
             <button onClick={()=>{setSunMode(s=>!s);setShowMenu(false);}} style={{width:"100%",padding:"11px 12px",borderRadius:10,border:"1px solid #2d4a5c",background:sunMode?"#ffd700":"transparent",color:sunMode?"#333":"#a8c0d9",fontSize:13,fontWeight:700,cursor:"pointer",marginBottom:8,textAlign:"left"}}>{sunMode?"🌙 Normal mode":"☀️ Sunlight mode"}</button>
             <button onClick={()=>{setShowAppSettings(true);setShowMenu(false);}} style={{width:"100%",padding:"11px 12px",borderRadius:10,border:"1px solid #2d4a5c",background:"transparent",color:"#a8c0d9",fontSize:13,fontWeight:700,cursor:"pointer",textAlign:"left"}}>⚙️ Settings (backup / restore)</button>
           </div>
