@@ -327,27 +327,32 @@ const groutProgress = (pile) => {
   const bands = pile.groutBands || [];
   if (!dia || !calib || bands.length < 2) return null;
   const r2 = Math.pow(dia/24, 2);
-  const bottomDepth = bands[0].depth;
-  const totalVol = PI_LANGAN * r2 * bottomDepth;               // full pile theoretical (ft³)
-  const targetFinalStrokes = totalVol * 1.15 / calib;          // strokes above baseline needed for GF 1.15
-  const base = parseFloat(bands[0].strokes);
+  // Match the official GF math (calcDerived): counter readings are the strokes
+  // pumped into THIS pile — the bottom band's reading is real grout placed at
+  // the bottom, NOT a baseline to subtract. Depth follows the same rule as
+  // everywhere else: manual Drill Depth wins, band bottom is the fallback.
+  const drilledFt = parseFloat(pile.drillDepth) || bands[0].depth;
+  const totalVol = PI_LANGAN * r2 * drilledFt;                 // full pile theoretical (ft³)
+  const targetFinalStrokes = totalVol * 1.15 / calib;          // total strokes needed for GF 1.15
   let lastFilled = -1;
   for (let i = 0; i < bands.length; i++) if (bands[i].strokes !== "" && bands[i].strokes != null) lastFilled = i;
   const out = {
-    targetFinal: Math.ceil(targetFinalStrokes + (isNaN(base) ? 0 : base)),
+    targetFinal: Math.ceil(targetFinalStrokes),
     runningGF: null, onTrack: null, remBands: null, needPerBand: null, finished: false
   };
-  if (isNaN(base) || lastFilled < 1) return out;
-  const cur = parseFloat(bands[lastFilled].strokes) - base;    // strokes placed so far
-  const coveredVol = PI_LANGAN * r2 * (bottomDepth - bands[lastFilled].depth);
+  if (lastFilled < 1) return out;
+  const cur = parseFloat(bands[lastFilled].strokes);           // total strokes placed so far
+  out.remBands = bands.length - 1 - lastFilled;
+  out.finished = out.remBands === 0;
+  // Running average: while mid-pile, compare against the volume covered so
+  // far; once finished, against the full pile volume (== the official GF).
+  const coveredVol = out.finished ? totalVol : PI_LANGAN * r2 * (bands[0].depth - bands[lastFilled].depth);
   if (coveredVol <= 0) return out;
   out.runningGF = (cur * calib) / coveredVol;
   out.onTrack = out.runningGF >= 1.15;
-  out.remBands = bands.length - 1 - lastFilled;
-  out.finished = out.remBands === 0;
   const needMore = Math.max(0, targetFinalStrokes - cur);
   out.needPerBand = out.remBands > 0 ? Math.ceil(needMore / out.remBands) : null;
-  out.curReading = parseFloat(bands[lastFilled].strokes);
+  out.curReading = cur;
   return out;
 };
 // Cumulative pace target at a given band depth — the counter reading that keeps
@@ -357,11 +362,9 @@ const paceTargetAt = (pile, depth) => {
   const calib = parseFloat(dayProjectInfo().pumpCalibFactor);
   const bands = pile.groutBands || [];
   if (!dia || !calib || !bands.length) return null;
-  const base = parseFloat(bands[0].strokes);
-  if (isNaN(base)) return null;
   const vol = PI_LANGAN * Math.pow(dia/24, 2) * (bands[0].depth - depth);
   if (vol <= 0) return null;
-  return Math.ceil(base + vol * 1.15 / calib);
+  return Math.ceil(vol * 1.15 / calib);
 };
 
 // ── Per-pile issue summary — drives the ⚠ indicators on collapsed sections,
@@ -371,11 +374,12 @@ const pileIssues = (pile) => {
   const groutActive = !!pile.groutStart;
   const missBands = groutActive ? (pile.groutBands||[]).filter(b => b.strokes === "" || b.strokes == null).length : 0;
   // Only flag grout factor once the pile is COMPLETE and the overall average
-  // is below 1.15 — a single low interval mid-pile is not an issue.
+  // is below 1.15 — a single low interval mid-pile is not an issue. Uses the
+  // same calcDerived value shown everywhere else (incl. manual overrides).
   let low = 0;
   if (pile.groutEnd) {
-    const gp = groutProgress(pile);
-    if (gp && gp.finished && gp.runningGF != null && gp.runningGF < 1.15) low = 1;
+    const gf = parseFloat(calcDerived(pile, { pumpCalibFactor: dayProjectInfo().pumpCalibFactor }).groutFactor);
+    if (!isNaN(gf) && gf < 1.15) low = 1;
   }
   const trucksEmpty = (pile.groutEnd && !(pile.trucks||[]).some(t => t.no||t.ticket||t.qty||t.batch)) ? 1 : 0;
   return { missSec, missBands, low, trucksEmpty, total: missSec + missBands + low + trucksEmpty };
@@ -1551,7 +1555,7 @@ function PileDetailsForm({ pile, onUpdate }) {
 // ── Pile Panel ────────────────────────────────────────────────────────────────
 // Pile settings modal — pile type, recording interval, grout spacing, and the
 // Not Installed toggle. Shared by the pile detail page header.
-function PileSettingsModal({ pile, index, onUpdate, onClose }) {
+function PileSettingsModal({ pile, index, onUpdate, onClose, onCreateRedrill }) {
   const phase = pile.groutEnd?"complete":pile.groutStart?"grouting":pile.drillEnd?"grouting-ready":pile.drillStart?"drilling":"setup";
   // Settings (recording interval, ACIP/RI) can only be changed before
   // drilling starts — changing mid-pile would corrupt the depth math.
@@ -1601,13 +1605,22 @@ function PileSettingsModal({ pile, index, onUpdate, onClose }) {
 
         <div style={{ color:"#a8c0d9", fontSize:12, fontWeight:700, marginBottom:6 }}>Installation status</div>
         <button onClick={()=>onUpdate({...pile,notInstalled:!pile.notInstalled})} style={{
-          width:"100%", padding:"10px 6px", borderRadius:10, marginBottom:20,
+          width:"100%", padding:"10px 6px", borderRadius:10, marginBottom: pile.notInstalled ? 8 : 20,
           border: pile.notInstalled ? "2px solid #e74c3c" : "1px solid #2d4a5c",
           background: pile.notInstalled ? "#4a1510" : "#0d2236", color: pile.notInstalled ? "#e74c3c" : "#fff",
           fontSize:12, fontWeight:700, cursor:"pointer"
         }}>
           {pile.notInstalled ? "⛔ NOT INSTALLED — will show in summary (tap to undo)" : "Mark as Not Installed (pile to be redrilled)"}
         </button>
+        {pile.notInstalled && onCreateRedrill && (
+          <button onClick={onCreateRedrill} style={{
+            width:"100%", padding:"10px 6px", borderRadius:10, marginBottom:20,
+            border:"1px dashed #4fc3f7", background:"transparent", color:"#4fc3f7",
+            fontSize:12, fontWeight:700, cursor:"pointer"
+          }}>
+            ➕ Start Re-Drill pile ({(pile.pileNo||"").trim()} Re-Drill)
+          </button>
+        )}
 
         <button onClick={onClose} style={{ width:"100%", padding:13, borderRadius:10, border:"none", background:"#27ae60", color:"#fff", fontSize:15, fontWeight:800, cursor:"pointer" }}>Done</button>
       </div>
@@ -2065,7 +2078,7 @@ function PileDetailPage({ piles, pileId, onUpdate, onRemove, onBack, onNavigate,
             <button onClick={()=>onRemove(pile.id)} style={{background:"#922b21",border:"none",color:"#fff",borderRadius:6,padding:"5px 10px",cursor:"pointer",fontSize:13}}>✕</button>
           </span>
         </div>
-        {showSettings && <PileSettingsModal pile={pile} index={idx} onUpdate={onUpdate} onClose={()=>setShowSettings(false)}/>}
+        {showSettings && <PileSettingsModal pile={pile} index={idx} onUpdate={onUpdate} onClose={()=>setShowSettings(false)} onCreateRedrill={onAdd ? ()=>{setShowSettings(false); onAdd(`${(pile.pileNo||"").trim()} Re-Drill`.trim());} : null}/>}
         <PilePanel key={pile.id} pile={pile} index={idx} onUpdate={onUpdate}/>
       </div>
     </div>
@@ -2286,8 +2299,11 @@ function App() {
     setPdfRendering(false);
   };
 
-  const addPile=()=>{
+  const addPile=(pileNoOverride)=>{
     const np = inheritedPile(piles[piles.length-1]);
+    // Used by the Re-Drill shortcut; onClick handlers pass an event, so only
+    // accept an explicit string.
+    if (typeof pileNoOverride === "string") np.pileNo = pileNoOverride;
     setPiles(p=>[...p, np]);
     setShowProject(false);
     setOpenPileId(np.id); // jump straight into the new pile's page
@@ -2369,9 +2385,21 @@ function App() {
         return "<tr>" + cells.map(v=>`<td style="border:1px solid #000;padding:4px 6px;font-size:9pt;vertical-align:top">${esc(v)}</td>`).join("") + "</tr>";
       }).join("\n");
       const headers = ["Number of installed piles","Pile ID","Date of Installation","Pile Diameter (in)","Appx. Ground El. (ft)","Drilled Depth (ft)","Approx Tip El. (ft)","Pile Cut-off El. (ft)","Pile Length (ft)","Grout Vol. (ft\u00B3)","Grout Factor","Reinforcement","Remarks"];
+      // Completion statement: piles completed today (comma-separated) + total
+      // grout CY (truck quantities are cumulative — the day's max is the total)
+      const completed = piles.filter(p => p.groutEnd && !p.notInstalled).map((p,i) => p.pileNo || `(pile ${piles.indexOf(p)+1})`);
+      let totalCY = null;
+      piles.forEach(p => (p.trucks||[]).forEach(t => {
+        const q = parseFloat(t.qty);
+        if (!isNaN(q) && (totalCY == null || q > totalCY)) totalCY = q;
+      }));
+      const statement = completed.length
+        ? `A total of ${completed.length} pile${completed.length!==1?"s were":" was"} completed: ${completed.join(", ")}.${totalCY!=null?` Total grout used: ${totalCY} cubic yards.`:""}`
+        : (totalCY!=null ? `Total grout used: ${totalCY} cubic yards.` : "");
       const html = `<html xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:w="urn:schemas-microsoft-com:office:word"><head><meta charset="utf-8"><title>Daily Summary</title></head><body>
 <p style="font-weight:bold;text-align:center;font-size:10pt">Table \u2013 Daily Summary of Auger Cast Pile Installation During Production</p>
-<table style="border-collapse:collapse;width:100%">
+${statement ? `<p style="text-align:center;font-size:10pt">${esc(statement)}</p>` : ""}
+<table align="center" style="border-collapse:collapse;margin-left:auto;margin-right:auto">
 <tr>${headers.map(h=>`<th style="border:1px solid #000;padding:4px 6px;font-size:9pt;background:#dce6f1">${h}</th>`).join("")}</tr>
 ${rows}
 </table>
