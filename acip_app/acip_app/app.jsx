@@ -109,7 +109,7 @@ const emptyPile = () => ({
   pileCapacity: "", capThickness: "", pileLength: "", drillDepth: "", tipElevation: "",
   cutoffElevation: "", theoreticalVol: "", totalStrokes: "",
   actualVolume: "", groutFactor: "",
-  reinfSteel: "PC4", groutStrength: "5,000psi",
+  reinfSteel: "", groutStrength: "5,000psi",  // reinfSteel blank = auto-follows pileType
   trucks: Array.from({ length: 3 }, () => ({ no:"", ticket:"", qty:"", batch:"" })),
   flow: "", batchTime: "",
   groutSupplier: "PEGASUS CONCRETE", productCode: "",
@@ -1287,7 +1287,7 @@ async function generatePDF(project, piles) {
     const botRows=[
       ["Drilling Time", p=>`Start: ${hm(p.drillStart)}   End: ${hm(p.drillEnd)}`],
       ["Pump Time",     p=>`Start: ${hm(p.groutStart)}   End: ${hm(p.groutEnd)}`],
-      ["Reinforcing Steel", p=>p.pileKind==="RI" ? "N/A — unreinforced" : (p.reinfSteel||"")],
+      ["Reinforcing Steel", p=>p.pileKind==="RI" ? "N/A — unreinforced" : (p.reinfSteel||p.pileType||"")],
       ["Grout Strength (lbs/in\u00b2)", p=>p.groutStrength||""],
       ["Truck 1 — No / Ticket / Qty", p=>{const t=sortedTrucks(p)[0]; return t&&(t.no||t.ticket||t.qty) ? `${t.no||"—"}  /  ${t.ticket||"—"}  /  ${t.qty?t.qty+" cy":"—"}` : "";}],
       ["Truck 2 — No / Ticket / Qty", p=>{const t=sortedTrucks(p)[1]; return t&&(t.no||t.ticket||t.qty) ? `${t.no||"—"}  /  ${t.ticket||"—"}  /  ${t.qty?t.qty+" cy":"—"}` : "";}],
@@ -1475,7 +1475,7 @@ function Field({ label, field, obj, set, type="text", placeholder="" }) {
 // A computed field shows its live auto-calculated value with an "auto" tag.
 // Tapping the ✏️ turns it into a normal editable input (manual override,
 // which calcDerived always prefers over the computed value).
-function ComputedField({ label, field, pile, onUpdate, computedValue, unit="" }) {
+function ComputedField({ label, field, pile, onUpdate, computedValue, unit="", type="number" }) {
   const [editing, setEditing] = useState(!!pile[field]);
   const isOverridden = !!pile[field];
   if (editing) {
@@ -1486,7 +1486,7 @@ function ComputedField({ label, field, pile, onUpdate, computedValue, unit="" })
           <button onClick={()=>{ onUpdate({ ...pile, [field]: "" }); setEditing(false); }}
             title="Back to auto-calculated" style={{ background:"none", border:"none", color:"#4a7fa5", fontSize:10, cursor:"pointer", padding:0 }}>↺ auto</button>
         </div>
-        <input type="number" value={pile[field]||""} onChange={e=>onUpdate({...pile,[field]:e.target.value})} style={FIELD_INP} autoFocus/>
+        <input type={type} value={pile[field]||""} onChange={e=>onUpdate({...pile,[field]:e.target.value})} style={FIELD_INP} autoFocus/>
       </div>
     );
   }
@@ -1536,7 +1536,7 @@ function PileDetailsForm({ pile, onUpdate }) {
       <Field obj={pile} set={set} label="Total Strokes Pumped" field="totalStrokes" type="number"/>
       <ComputedField label="Actual Volume (ft³)" field="actualVolume" pile={pile} onUpdate={onUpdate} computedValue={derived.actual} unit={derived.calibFactor?"":" (needs pump calib.)"}/>
       <ComputedField label="Grout Factor" field="groutFactor" pile={pile} onUpdate={onUpdate} computedValue={derived.groutFactor}/>
-      <Field obj={pile} set={set} label="Reinforcing Steel" field="reinfSteel"/><Field obj={pile} set={set} label="Grout Strength" field="groutStrength"/>
+      <ComputedField label="Reinforcing Steel" field="reinfSteel" pile={pile} onUpdate={onUpdate} computedValue={pile.pileType||""} type="text"/><Field obj={pile} set={set} label="Grout Strength" field="groutStrength"/>
       <Field obj={pile} set={set} label="Grout Supplier" field="groutSupplier"/><Field obj={pile} set={set} label="Product Code" field="productCode"/>
       <Field obj={pile} set={set} label="Flow (s) / Spread (in)" field="flow"/>
       <Field obj={pile} set={set} label="Slurry @ (ft)" field="slurryAt"/><Field obj={pile} set={set} label="Grout @ (ft)" field="groutAt"/>
@@ -2105,7 +2105,12 @@ function App() {
     const fixDays = (days) => days.map(d => ({
       ...d,
       projectInfo: d.projectInfo || { ...(e.project || emptyProject()) },
-      piles: (d.piles||[]).map(repairFeet)
+      piles: (d.piles||[]).map(p => {
+        const r = repairFeet(p);
+        // reinfSteel equal to pileType was the old default, not a manual edit —
+        // clear it so it auto-follows the type from now on.
+        return (r.reinfSteel && r.reinfSteel === r.pileType) ? { ...r, reinfSteel: "" } : r;
+      })
     }));
     if (Array.isArray(e.days) && e.days.length) return { ...e, days: fixDays(e.days) };
     const day = { id: (e.id||Date.now())+1, date: (e.project&&e.project.date) || new Date().toLocaleDateString("en-US"), projectInfo: { ...(e.project || emptyProject()) }, piles: (Array.isArray(e.piles)&&e.piles.length)?e.piles.map(repairFeet):[emptyPile()] };
@@ -2379,7 +2384,7 @@ function App() {
           d.pileLength || "",
           d.actual || "",
           d.groutFactor || "",
-          pile.reinfSteel || "",
+          pile.pileKind==="RI" ? "N/A" : (pile.reinfSteel || pile.pileType || ""),
           remarks
         ];
         return "<tr>" + cells.map(v=>`<td style="border:1px solid #000;padding:4px 6px;font-size:9pt;vertical-align:top">${esc(v)}</td>`).join("") + "</tr>";
