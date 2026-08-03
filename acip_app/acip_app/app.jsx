@@ -9,7 +9,7 @@ const fmtTime = (s) => `${Math.floor(s/60)}:${String(s%60).padStart(2,"0")}`;
 // vs "PC6"). When the user changes a pile's type, its remembered values are
 // applied — so switching between two pile types on the same site doesn't drag
 // over the wrong diameter/capacity/etc. from whichever type was drilled last.
-const TYPE_MEMORY_FIELDS = ["pileDiameter","groundElevation","pileCapacity","capThickness","reinfSteel","groutStrength","groutSupplier","productCode","flow"];
+const TYPE_MEMORY_FIELDS = ["pileDiameter","groundElevation","pileCapacity","capThickness","groutStrength","groutSupplier","productCode","flow"]; // reinfSteel excluded — it auto-follows pileType
 const loadTypeMemory = () => { try { return JSON.parse(localStorage.getItem("acip_pile_type_memory")) || {}; } catch(e) { return {}; } };
 const saveTypeMemory = (pile) => {
   if (!pile.pileType) return;
@@ -1477,6 +1477,10 @@ function Field({ label, field, obj, set, type="text", placeholder="" }) {
 // which calcDerived always prefers over the computed value).
 function ComputedField({ label, field, pile, onUpdate, computedValue, unit="", type="number" }) {
   const [editing, setEditing] = useState(!!pile[field]);
+  // Focus the input only when the user tapped to edit — an overridden field
+  // rendering in edit mode on mount must NOT grab focus, or opening the
+  // Details tab pops the keyboard uninvited.
+  const tappedRef = useRef(false);
   const isOverridden = !!pile[field];
   if (editing) {
     return (
@@ -1486,7 +1490,8 @@ function ComputedField({ label, field, pile, onUpdate, computedValue, unit="", t
           <button onClick={()=>{ onUpdate({ ...pile, [field]: "" }); setEditing(false); }}
             title="Back to auto-calculated" style={{ background:"none", border:"none", color:"#4a7fa5", fontSize:10, cursor:"pointer", padding:0 }}>↺ auto</button>
         </div>
-        <input type={type} value={pile[field]||""} onChange={e=>onUpdate({...pile,[field]:e.target.value})} style={FIELD_INP} autoFocus/>
+        <input type={type} value={pile[field]||""} onChange={e=>onUpdate({...pile,[field]:e.target.value})} style={FIELD_INP}
+          ref={el => { if (el && tappedRef.current) { el.focus(); tappedRef.current = false; } }}/>
       </div>
     );
   }
@@ -1496,7 +1501,7 @@ function ComputedField({ label, field, pile, onUpdate, computedValue, unit="", t
         <span style={FIELD_LBL}>{label}</span>
         <span style={{ background:"#1a3a5c", color:"#7fc4f0", fontSize:9, fontWeight:800, padding:"1px 6px", borderRadius:5 }}>AUTO</span>
       </div>
-      <div onClick={()=>setEditing(true)} style={{ ...FIELD_INP, display:"flex", alignItems:"center", justifyContent:"space-between", cursor:"pointer", color: computedValue ? "#4fc3f7" : "#4a7fa5", background:"#0a1a29" }}>
+      <div onClick={()=>{ tappedRef.current = true; setEditing(true); }} style={{ ...FIELD_INP, display:"flex", alignItems:"center", justifyContent:"space-between", cursor:"pointer", color: computedValue ? "#4fc3f7" : "#4a7fa5", background:"#0a1a29" }}>
         <span>{computedValue ? `${computedValue}${unit}` : "—"}</span>
         <span style={{ fontSize:12, color:"#4a7fa5" }}>✏️</span>
       </div>
@@ -2089,7 +2094,7 @@ function App() {
   // ── Multi-project store: projects[] each with own info + piles ──
   // Migrates the old single-project storage automatically on first load.
   // Fields a new pile inherits from the previous one (manual, non-computed inputs).
-  const INHERIT_FIELDS = ["pileKind","footInterval","groutInterval","pileType","pileDiameter","groundElevation","pileCapacity","capThickness","reinfSteel","groutStrength","groutSupplier","productCode","flow"];
+  const INHERIT_FIELDS = ["pileKind","footInterval","groutInterval","pileType","pileDiameter","groundElevation","pileCapacity","capThickness","groutStrength","groutSupplier","productCode","flow"]; // reinfSteel excluded — auto-follows pileType
   const inheritedPile = (fromPile) => {
     const np = emptyPile();
     if (fromPile) INHERIT_FIELDS.forEach(k => { if (fromPile[k]) np[k] = fromPile[k]; });
@@ -2107,9 +2112,10 @@ function App() {
       projectInfo: d.projectInfo || { ...(e.project || emptyProject()) },
       piles: (d.piles||[]).map(p => {
         const r = repairFeet(p);
-        // reinfSteel equal to pileType was the old default, not a manual edit —
-        // clear it so it auto-follows the type from now on.
-        return (r.reinfSteel && r.reinfSteel === r.pileType) ? { ...r, reinfSteel: "" } : r;
+        // Stored reinfSteel equal to the pile type, or equal to "PC4" (the old
+        // hardcoded default), was never a deliberate edit — clear it so the
+        // field auto-follows the pile type from now on.
+        return (r.reinfSteel && (r.reinfSteel === r.pileType || r.reinfSteel === "PC4")) ? { ...r, reinfSteel: "" } : r;
       })
     }));
     if (Array.isArray(e.days) && e.days.length) return { ...e, days: fixDays(e.days) };
