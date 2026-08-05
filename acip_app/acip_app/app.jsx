@@ -321,6 +321,37 @@ const dayProjectInfo = () => {
 // least 1.15. This is guidance, not a per-interval alarm.
 // Stroke entries are cumulative counter readings; the bottom band's reading is
 // the baseline (handles counters that don't start at zero).
+// Target grout factor before grout return — configurable in Settings (default
+// 1.15). Once grout return is observed at a depth, spans SHALLOWER than that
+// depth only need to replace displaced volume (factor 1.0) — the annulus is
+// already full, so holding the full target there would over-warn.
+const gfTarget = () => {
+  const t = parseFloat(dayProjectInfo().gfTarget);
+  return (!isNaN(t) && t > 0) ? t : 1.15;
+};
+// Cumulative required strokes from the pile bottom up to `depth`, blending the
+// pre-return target and the post-return 1.0 factor at the grout-return depth.
+const requiredStrokesTo = (pile, depth) => {
+  const dia = parseFloat(pile.pileDiameter);
+  const calib = parseFloat(dayProjectInfo().pumpCalibFactor);
+  const bands = pile.groutBands || [];
+  if (!dia || !calib || !bands.length) return null;
+  const r2 = Math.pow(dia/24, 2);
+  const bottom = bands[0].depth;
+  if (depth >= bottom) return 0;
+  const t = gfTarget();
+  const ga = parseFloat(pile.groutAt);
+  const returnDepth = (!isNaN(ga) && ga >= 0 && ga < bottom) ? ga : null;
+  let vol;
+  if (returnDepth == null || depth >= returnDepth) {
+    // Entire covered span is below (deeper than) the return point — full target
+    vol = PI_LANGAN * r2 * (bottom - depth) * t;
+  } else {
+    // Split at the return depth: full target below it, 1.0 above it
+    vol = PI_LANGAN * r2 * ((bottom - returnDepth) * t + (returnDepth - depth) * 1.0);
+  }
+  return vol / calib;
+};
 const groutProgress = (pile) => {
   const dia = parseFloat(pile.pileDiameter);
   const calib = parseFloat(dayProjectInfo().pumpCalibFactor);
@@ -328,43 +359,39 @@ const groutProgress = (pile) => {
   if (!dia || !calib || bands.length < 2) return null;
   const r2 = Math.pow(dia/24, 2);
   // Match the official GF math (calcDerived): counter readings are the strokes
-  // pumped into THIS pile — the bottom band's reading is real grout placed at
-  // the bottom, NOT a baseline to subtract. Depth follows the same rule as
-  // everywhere else: manual Drill Depth wins, band bottom is the fallback.
+  // pumped into THIS pile. Depth: manual Drill Depth wins, band bottom fallback.
   const drilledFt = parseFloat(pile.drillDepth) || bands[0].depth;
   const totalVol = PI_LANGAN * r2 * drilledFt;                 // full pile theoretical (ft³)
-  const targetFinalStrokes = totalVol * 1.15 / calib;          // total strokes needed for GF 1.15
+  const targetFinalStrokes = requiredStrokesTo(pile, 0);       // blended target at surface
   let lastFilled = -1;
   for (let i = 0; i < bands.length; i++) if (bands[i].strokes !== "" && bands[i].strokes != null) lastFilled = i;
   const out = {
-    targetFinal: Math.ceil(targetFinalStrokes),
-    runningGF: null, onTrack: null, remBands: null, needPerBand: null, finished: false
+    targetFinal: targetFinalStrokes != null ? Math.ceil(targetFinalStrokes) : null,
+    target: gfTarget(), returnDepth: (!isNaN(parseFloat(pile.groutAt)) ? parseFloat(pile.groutAt) : null),
+    runningGF: null, onTrack: null, remBands: null, needPerBand: null, finished: false, meetsTarget: null
   };
-  if (lastFilled < 1) return out;
+  if (lastFilled < 1 || targetFinalStrokes == null) return out;
   const cur = parseFloat(bands[lastFilled].strokes);           // total strokes placed so far
   out.remBands = bands.length - 1 - lastFilled;
   out.finished = out.remBands === 0;
-  // Running average: while mid-pile, compare against the volume covered so
-  // far; once finished, against the full pile volume (== the official GF).
   const coveredVol = out.finished ? totalVol : PI_LANGAN * r2 * (bands[0].depth - bands[lastFilled].depth);
   if (coveredVol <= 0) return out;
   out.runningGF = (cur * calib) / coveredVol;
-  out.onTrack = out.runningGF >= 1.15;
+  // On-track compares against the blended requirement at the current depth —
+  // after grout return, the bar drops to 1.0 for the shallower spans.
+  const reqSoFar = requiredStrokesTo(pile, out.finished ? 0 : bands[lastFilled].depth);
+  out.onTrack = reqSoFar != null ? cur >= reqSoFar - 0.5 : null;
+  out.meetsTarget = out.finished ? cur >= targetFinalStrokes - 0.5 : null;
   const needMore = Math.max(0, targetFinalStrokes - cur);
   out.needPerBand = out.remBands > 0 ? Math.ceil(needMore / out.remBands) : null;
   out.curReading = cur;
   return out;
 };
-// Cumulative pace target at a given band depth — the counter reading that keeps
-// the running average at 1.15 by that point. Guidance for the numpad hint.
+// Cumulative pace target at a given band depth for the numpad hint — the
+// counter reading that keeps the running average on the blended requirement.
 const paceTargetAt = (pile, depth) => {
-  const dia = parseFloat(pile.pileDiameter);
-  const calib = parseFloat(dayProjectInfo().pumpCalibFactor);
-  const bands = pile.groutBands || [];
-  if (!dia || !calib || !bands.length) return null;
-  const vol = PI_LANGAN * Math.pow(dia/24, 2) * (bands[0].depth - depth);
-  if (vol <= 0) return null;
-  return Math.ceil(vol * 1.15 / calib);
+  const req = requiredStrokesTo(pile, depth);
+  return req != null && req > 0 ? Math.ceil(req) : null;
 };
 
 // ── Per-pile issue summary — drives the ⚠ indicators on collapsed sections,
@@ -373,13 +400,13 @@ const pileIssues = (pile) => {
   const missSec = pile.drillEnd ? missingFeet(pile).length : 0;
   const groutActive = !!pile.groutStart;
   const missBands = groutActive ? (pile.groutBands||[]).filter(b => b.strokes === "" || b.strokes == null).length : 0;
-  // Only flag grout factor once the pile is COMPLETE and the overall average
-  // is below 1.15 — a single low interval mid-pile is not an issue. Uses the
-  // same calcDerived value shown everywhere else (incl. manual overrides).
+  // Only flag grout once the pile is COMPLETE and the total falls short of the
+  // blended target (full target below the grout-return depth, 1.0 above it) —
+  // a single low interval mid-pile is never an issue.
   let low = 0;
   if (pile.groutEnd) {
-    const gf = parseFloat(calcDerived(pile, { pumpCalibFactor: dayProjectInfo().pumpCalibFactor }).groutFactor);
-    if (!isNaN(gf) && gf < 1.15) low = 1;
+    const gp = groutProgress(pile);
+    if (gp && gp.finished && gp.meetsTarget === false) low = 1;
   }
   const trucksEmpty = (pile.groutEnd && !(pile.trucks||[]).some(t => t.no||t.ticket||t.qty||t.batch)) ? 1 : 0;
   return { missSec, missBands, low, trucksEmpty, total: missSec + missBands + low + trucksEmpty };
@@ -863,7 +890,7 @@ function GroutScreen({ pile, onUpdate }) {
             Strokes going up — bottom to surface ({filled}/{bands.length} entered)
           </div>
 
-          {/* ── Running grout-factor tracker (GF ≥ 1.15 overall) — average-based
+          {/* ── Running grout-factor tracker (configurable target, return-aware) — average-based
               guidance: one low interval is fine if the next makes up for it ── */}
           {(() => {
             const gp = groutProgress(pile);
@@ -873,16 +900,17 @@ function GroutScreen({ pile, onUpdate }) {
               </div>
             );
             const gfTxt = gp.runningGF != null ? gp.runningGF.toFixed(2) : null;
-            const good = gp.onTrack;
+            const good = gp.finished ? gp.meetsTarget : gp.onTrack;
+            const retNote = gp.returnDepth != null ? ` (eased to 1.0 above ${gp.returnDepth}ft grout return)` : "";
             return (
               <div style={{ background: gfTxt==null ? "#1a2f42" : good ? "#0d2a1a" : "#3d2f00", border:`1px solid ${gfTxt==null ? "#2d6a9f" : good ? "#27ae60" : "#f0c040"}`, borderRadius:10, padding:"9px 12px" }}>
                 {gfTxt == null ? (
                   <div style={{ color:"#4fc3f7", fontSize:12, fontWeight:800 }}>
-                    🎯 Target at surface: ≥ {gp.targetFinal} total strokes (overall GF 1.15)
+                    🎯 Target at surface: ≥ {gp.targetFinal} total strokes (GF {gp.target}{retNote})
                   </div>
                 ) : gp.finished ? (
                   <div style={{ color: good ? "#2ecc71" : "#f0c040", fontSize:13, fontWeight:800 }}>
-                    {good ? "✓" : "▼"} Final grout factor: {gfTxt} {good ? "— meets 1.15 target" : "— below 1.15 target"}
+                    {good ? "✓" : "▼"} Final grout factor: {gfTxt} {good ? "— meets target" : "— below target"} (≥ {gp.targetFinal} strokes{retNote})
                   </div>
                 ) : (
                   <>
@@ -890,7 +918,7 @@ function GroutScreen({ pile, onUpdate }) {
                       {good ? "✓ On track" : "◔ Behind pace"} — running GF so far: {gfTxt}
                     </div>
                     <div style={{ color:"#a8c0d9", fontSize:11, marginTop:2 }}>
-                      Finish at ≥ {gp.targetFinal} total strokes{gp.needPerBand != null ? ` · avg ≥ ${gp.needPerBand} per remaining band` : ""}. Average is what counts — a low band can be made up on the next.
+                      Finish at ≥ {gp.targetFinal} total strokes{retNote}{gp.needPerBand != null ? ` · avg ≥ ${gp.needPerBand} per remaining band` : ""}. Average is what counts — a low band can be made up on the next.
                     </div>
                   </>
                 )}
@@ -1914,7 +1942,7 @@ function PilePanel({ pile, index, onUpdate }) {
               </Section>
 
               {/* ── 💉 GROUTING ── */}
-              <Section icon="💉" title="Grouting — bands & returns" badge={issues.low ? "▼ GF below 1.15" : issues.missBands ? `⚠ ${issues.missBands} band${issues.missBands>1?"s":""} empty` : null} badgeColor={issues.low ? "red" : undefined} open={groutOpen} onToggle={()=>setGroutOpen(o=>!o)}>
+              <Section icon="💉" title="Grouting — bands & returns" badge={issues.low ? "▼ Grout below target" : issues.missBands ? `⚠ ${issues.missBands} band${issues.missBands>1?"s":""} empty` : null} badgeColor={issues.low ? "red" : undefined} open={groutOpen} onToggle={()=>setGroutOpen(o=>!o)}>
                 {(phase==="setup"||phase==="drilling") ? (
                   <div style={{color:"#4a7fa5",fontSize:13,padding:"4px 2px"}}>Grouting opens after drilling is finished — bands are built from the final drill depth.</div>
                 ) : (
@@ -2275,6 +2303,60 @@ function App() {
     input.click();
   };
 
+  // Merge a teammate's backup into this device WITHOUT replacing anything —
+  // matches projects by id or name, days by id or date, and adds only piles
+  // whose ids don't already exist here. Blank auto-created piles are skipped.
+  const handleMergeImport = () => {
+    const input = document.createElement("input");
+    input.type = "file";
+    input.accept = ".json";
+    input.onchange = (e) => {
+      const file = e.target.files[0];
+      if (!file) return;
+      const reader = new FileReader();
+      reader.onload = (ev) => {
+        try {
+          const incoming = JSON.parse(ev.target.result);
+          if (!incoming.projects || !Array.isArray(incoming.projects)) throw new Error("Invalid backup format");
+          let added = 0, newDays = 0, newProjects = 0;
+          setStore(s => {
+            const next = JSON.parse(JSON.stringify(s));
+            const nameOf = (p) => String((p.project&&p.project.projectName)||"").trim().toLowerCase();
+            incoming.projects.forEach(inP => {
+              let tgt = next.projects.find(p => p.id === inP.id);
+              if (!tgt && nameOf(inP)) tgt = next.projects.find(p => nameOf(p) === nameOf(inP));
+              if (!tgt) { next.projects.push(normalizeEntry(JSON.parse(JSON.stringify(inP)))); newProjects++; return; }
+              (inP.days||[]).forEach(inD => {
+                let tDay = (tgt.days||[]).find(d => d.id === inD.id);
+                if (!tDay) tDay = (tgt.days||[]).find(d => String(d.date) === String(inD.date));
+                if (!tDay) { tgt.days.push(JSON.parse(JSON.stringify(inD))); newDays++; return; }
+                const have = new Set((tDay.piles||[]).map(p => p.id));
+                (inD.piles||[]).forEach(inPile => {
+                  const hasData = inPile.pileNo || inPile.drillStart || (inPile.feet && inPile.feet.length);
+                  if (!have.has(inPile.id) && hasData) { tDay.piles.push(JSON.parse(JSON.stringify(inPile))); added++; }
+                });
+              });
+            });
+            return { ...next, projects: next.projects.map(normalizeEntry) };
+          });
+          setImportError("");
+          setTimeout(() => alert(`Merge complete: ${added} pile(s) added` + (newDays?`, ${newDays} new day(s)`:"") + (newProjects?`, ${newProjects} new project(s)`:"") + ". Nothing on this device was replaced."), 50);
+        } catch(err) {
+          const msg = "Merge failed: " + err.message;
+          setImportError(msg);
+          alert(msg);
+        }
+      };
+      reader.readAsText(file);
+    };
+    input.click();
+  };
+
+  // Edit the active day's date (Settings) — e.g. when catching up on an older day
+  const setDayDate = (date) => setStore(s => ({ ...s,
+    projects: s.projects.map(e => e.id !== active.id ? e : { ...e, days: e.days.map(d => d.id !== activeDay.id ? d : { ...d, date }) })
+  }));
+
   // Keep screen awake so the tablet doesn't sleep mid-pile
   useEffect(() => {
     let lock = null;
@@ -2487,9 +2569,25 @@ ${rows}
         <div style={{ position:"fixed", top:0, left:0, width:"100vw", height:"100dvh", background:"rgba(0,0,0,0.8)", zIndex:300, display:"flex", alignItems:"center", justifyContent:"center", padding:20 }} onClick={()=>setShowAppSettings(false)}>
           <div style={{ background:"#132536", borderRadius:18, padding:22, maxWidth:340, width:"100%" }} onClick={e=>e.stopPropagation()}>
             <div style={{ color:"#fff", fontWeight:900, fontSize:17, marginBottom:16 }}>⚙️ App Settings</div>
-            <div style={{ color:"#a8c0d9", fontSize:12, fontWeight:700, marginBottom:6 }}>Data backup</div>
+
+            <div style={{ color:"#a8c0d9", fontSize:12, fontWeight:700, marginBottom:6 }}>This day's date</div>
+            <input value={activeDay.date} onChange={e=>setDayDate(e.target.value)} placeholder="e.g. 8/3/2026"
+              style={{width:"100%",padding:"10px 12px",borderRadius:10,border:"1px solid #2d4a5c",background:"#0d2236",color:"#fff",fontSize:14,boxSizing:"border-box",marginBottom:4}}/>
+            <div style={{ color:"#4a7fa5", fontSize:10, marginBottom:16 }}>Only editable here so it can't be changed accidentally. Used on PDFs and the summary table.</div>
+
+            <div style={{ color:"#a8c0d9", fontSize:12, fontWeight:700, marginBottom:6 }}>Grout requirements</div>
+            <div style={{ display:"flex", alignItems:"center", gap:10, marginBottom:4 }}>
+              <span style={{ color:"#a8c0d9", fontSize:12, flex:1 }}>Target grout factor (before grout return)</span>
+              <input type="number" step="0.01" value={project.gfTarget||""} placeholder="1.15"
+                onChange={e=>setProject({...project, gfTarget:e.target.value})}
+                style={{width:80,padding:"9px 10px",borderRadius:10,border:"1px solid #2d4a5c",background:"#0d2236",color:"#fff",fontSize:14,boxSizing:"border-box"}}/>
+            </div>
+            <div style={{ color:"#4a7fa5", fontSize:10, marginBottom:16 }}>Drives the strokes tracker & pace hints. After grout return is observed, spans above it only need factor 1.0. Blank = 1.15.</div>
+
+            <div style={{ color:"#a8c0d9", fontSize:12, fontWeight:700, marginBottom:6 }}>Data backup & team sync</div>
             <button onClick={handleExport} style={{width:"100%",padding:"12px 6px",borderRadius:10,border:"1px solid #4a7fa5",background:"transparent",color:"#4a7fa5",fontWeight:700,fontSize:13,cursor:"pointer",marginBottom:8}}>💾 Export all data to file</button>
-            <button onClick={handleImport} style={{width:"100%",padding:"12px 6px",borderRadius:10,border:"1px solid #2ecc71",background:"transparent",color:"#2ecc71",fontWeight:700,fontSize:13,cursor:"pointer",marginBottom:20}}>📂 Import from backup file</button>
+            <button onClick={handleMergeImport} style={{width:"100%",padding:"12px 6px",borderRadius:10,border:"1px solid #4fc3f7",background:"transparent",color:"#4fc3f7",fontWeight:700,fontSize:13,cursor:"pointer",marginBottom:8}}>🔀 Merge teammate's backup (adds their piles)</button>
+            <button onClick={handleImport} style={{width:"100%",padding:"12px 6px",borderRadius:10,border:"1px solid #e67e22",background:"transparent",color:"#e6a35c",fontWeight:700,fontSize:13,cursor:"pointer",marginBottom:20}}>📂 Restore from backup (REPLACES everything)</button>
             <button onClick={()=>setShowAppSettings(false)} style={{ width:"100%", padding:13, borderRadius:10, border:"none", background:"#27ae60", color:"#fff", fontSize:15, fontWeight:800, cursor:"pointer" }}>Done</button>
           </div>
         </div>
