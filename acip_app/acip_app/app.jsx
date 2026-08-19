@@ -114,6 +114,7 @@ const emptyPile = () => ({
   flow: "", batchTime: "",
   groutSupplier: "PEGASUS CONCRETE", productCode: "",
   slurryAt: "", groutAt: "", notes: "",
+  quickDrill: false,             // Re-Drill mode — record Drill Start/End only, skip the foot-by-foot log
 });
 
 const emptyProject = () => ({
@@ -329,6 +330,14 @@ const gfTarget = () => {
   const t = parseFloat(dayProjectInfo().gfTarget);
   return (!isNaN(t) && t > 0) ? t : 1.15;
 };
+// Minimum depth (ft below ground surface) at which grout return should be
+// observed — a contractor maintaining proper grout pressure head should not
+// see return any shallower than this. Configurable in Settings (default 10ft
+// for this project).
+const minGroutReturnDepth = () => {
+  const t = parseFloat(dayProjectInfo().minGroutReturn);
+  return (!isNaN(t) && t >= 0) ? t : 10;
+};
 // Cumulative required strokes from the pile bottom up to `depth`, blending the
 // pre-return target and the post-return 1.0 factor at the grout-return depth.
 const requiredStrokesTo = (pile, depth) => {
@@ -397,7 +406,7 @@ const paceTargetAt = (pile, depth) => {
 // ── Per-pile issue summary — drives the ⚠ indicators on collapsed sections,
 // pile tabs, and the pile list, so logs needing review are visible at a glance.
 const pileIssues = (pile) => {
-  const missSec = pile.drillEnd ? missingFeet(pile).length : 0;
+  const missSec = (pile.drillEnd && !pile.quickDrill) ? missingFeet(pile).length : 0;
   const groutActive = !!pile.groutStart;
   const missBands = groutActive ? (pile.groutBands||[]).filter(b => b.strokes === "" || b.strokes == null).length : 0;
   // Only flag grout once the pile is COMPLETE and the total falls short of the
@@ -409,7 +418,12 @@ const pileIssues = (pile) => {
     if (gp && gp.finished && gp.meetsTarget === false) low = 1;
   }
   const trucksEmpty = (pile.groutEnd && !(pile.trucks||[]).some(t => t.no||t.ticket||t.qty||t.batch)) ? 1 : 0;
-  return { missSec, missBands, low, trucksEmpty, total: missSec + missBands + low + trucksEmpty };
+  // Grout return observed shallower than the required minimum depth — live
+  // heads-up as soon as it's entered, since pressure head should be
+  // maintained down to at least this depth throughout.
+  const ga = parseFloat(pile.groutAt);
+  const shallowReturn = (groutActive && pile.groutAt !== "" && pile.groutAt != null && !isNaN(ga) && ga < minGroutReturnDepth()) ? 1 : 0;
+  return { missSec, missBands, low, trucksEmpty, shallowReturn, total: missSec + missBands + low + trucksEmpty + shallowReturn };
 };
 
 function FillSecondsModal({ pile, onUpdate, onClose }) {
@@ -559,8 +573,11 @@ function DrillScreen({ pile, onUpdate }) {
   // Phase & timing derive entirely from persisted pile data — survives
   // reloads, tab discards, and re-renders (fixes the "huge timer" bug).
   const phase = !pile.drillStart ? "idle" : pile.drillEnd ? "done" : pile.pausedAt ? "paused" : "drilling";
+  const qd = !!pile.quickDrill; // Re-Drill mode: start/end time only, no foot-by-foot log
+  const effDepth = qd ? (parseFloat(pile.drillDepth) || 0) : depthFt(pile);
   const [, tick] = useState(0); // re-render every 250ms while drilling
   const [currentKnm, setCurrentKnm] = useState("");
+  const [showQuickDepth, setShowQuickDepth] = useState(false);
 
   const [showRefusal, setShowRefusal] = useState(false);
   const [showLateStart, setShowLateStart] = useState(false);
@@ -624,8 +641,28 @@ function DrillScreen({ pile, onUpdate }) {
     onUpdate({ ...pile, feet: pile.feet.slice(0, -1), footStartEpoch: Date.now() });
   };
 
+  // Quick fix for a missed tap: the timer keeps running across a skipped
+  // foot, so the NEXT tap's seconds looks inflated while the missed one
+  // looks empty/zero. Split the last two feet's combined seconds evenly —
+  // same math as the post-completion Redistribute tool, just one tap during
+  // drilling instead of an edit pass afterward.
+  const redistributeLastTwo = () => {
+    const feet = pile.feet || [];
+    if (feet.length < 2) return;
+    const last2 = feet.slice(-2);
+    const total = last2.reduce((s,f)=>s+(f.seconds||0), 0);
+    const base = Math.floor(total/2), extra = total - base*2;
+    const newFeet = feet.map((f,i) => {
+      if (i < feet.length - 2) return f;
+      const posInPair = i - (feet.length - 2); // 0 = earlier foot, 1 = later foot
+      return { ...f, seconds: base + (posInPair < extra ? 1 : 0) };
+    });
+    try { if (navigator.vibrate) navigator.vibrate(25); } catch(e) {}
+    onUpdate({ ...pile, feet: newFeet });
+  };
+
   const confirmRefusal = () => {
-    const ft = depthFt(pile);
+    const ft = effDepth;
     const note = `Drilling terminated — refusal at ${ft}ft`;
     const bands = buildGroutBands(ft, pile.groutInterval || 5);
     onUpdate({ ...pile, drillEnd: nowStr(), pausedAt: null, refusalDepth: ft, groutBands: bands, notes: pile.notes ? pile.notes + "\n" + note : note });
@@ -633,7 +670,13 @@ function DrillScreen({ pile, onUpdate }) {
   };
 
   const finishDrilling = () => {
-    const depth = depthFt(pile);
+    if (qd && !(parseFloat(pile.drillDepth) > 0)) {
+      // Quick-Drill mode has no foot log to derive depth from — the total
+      // depth must be entered manually before grout bands can be built.
+      setShowQuickDepth(true);
+      return;
+    }
+    const depth = effDepth;
     // Irreversible phase change — confirm to protect against an accidental tap
     if (!window.confirm(`Finish drilling at ${depth} ft and move to grouting?`)) return;
     const bands = buildGroutBands(depth, pile.groutInterval || 5);
@@ -653,8 +696,8 @@ function DrillScreen({ pile, onUpdate }) {
       <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr 1fr", gap:8 }}>
         {[
           ["Total Time", phase==="paused" ? "⏸ PAUSED" : fmtTime(elapsed), phase==="paused" ? "#f39c12" : "#fff"],
-          ["Depth", `${depthFt(pile)} ft`, "#4fc3f7"],
-          ["This Foot", phase==="paused" ? "—" : `${footTimer}s`, "#fff"],
+          ["Depth", `${effDepth} ft`, "#4fc3f7"],
+          qd ? ["Mode", "⏱ Quick", "#4fc3f7"] : ["This Foot", phase==="paused" ? "—" : `${footTimer}s`, "#fff"],
         ].map(([label, val, color]) => (
           <div key={label} style={{ background:"#071520", borderRadius:10, padding:"8px 6px", textAlign:"center" }}>
             <div style={{ color:"#4a7fa5", fontSize:10 }}>{label}</div>
@@ -663,8 +706,31 @@ function DrillScreen({ pile, onUpdate }) {
         ))}
       </div>
 
-      {/* ── Main area: tap button + KNm wheel side by side ── */}
-      {phase !== "done" && (
+      {/* ── Quick Drill (Re-Drill) — no foot log, just a manual total depth ── */}
+      {qd && phase !== "done" && (
+        <div style={{ background:"#0d2236", border:"1px solid #2d4a5c", borderRadius:12, padding:12 }}>
+          <div style={{ color:"#4fc3f7", fontSize:12, fontWeight:800, marginBottom:3 }}>⏱ Quick Drill — Re-Drill mode</div>
+          <div style={{ color:"#6a8caf", fontSize:11, marginBottom:10, lineHeight:1.4 }}>No foot-by-foot log for this pile. Enter the total depth once drilling reaches bottom, then finish to move to grouting.</div>
+          <div onClick={() => (phase==="drilling"||phase==="paused") && setShowQuickDepth(true)} style={{
+            background:"#071520", borderRadius:10, padding:"14px", cursor: (phase==="drilling"||phase==="paused") ? "pointer" : "default",
+            display:"flex", justifyContent:"space-between", alignItems:"center", border: `1px solid ${pile.drillDepth ? "#27ae60" : "#2d4a5c"}`
+          }}>
+            <span style={{ color:"#a8c0d9", fontSize:13, fontWeight:700 }}>Total Drilled Depth</span>
+            <span style={{ color: pile.drillDepth ? "#4fc3f7" : "#4a7fa5", fontSize:22, fontWeight:900 }}>{pile.drillDepth ? `${pile.drillDepth} ft` : "tap to enter"}</span>
+          </div>
+        </div>
+      )}
+      {showQuickDepth && (
+        <Numpad
+          label="Total Drilled Depth (ft)"
+          initialValue={pile.drillDepth || ""}
+          onConfirm={(v) => { onUpdate({ ...pile, drillDepth: v }); setShowQuickDepth(false); }}
+          onCancel={() => setShowQuickDepth(false)}
+        />
+      )}
+
+      {/* ── Main area: tap button + KNm wheel side by side (full drill log only) ── */}
+      {!qd && phase !== "done" && (
         <div style={{ display:"flex", gap:10, alignItems:"stretch" }}>
           {/* +1ft button */}
           <button
@@ -713,23 +779,28 @@ function DrillScreen({ pile, onUpdate }) {
       )}
 
       {(phase === "drilling" || phase === "paused") && (
-        <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr 1fr 1fr", gap:8 }}>
+        <div style={{ display:"grid", gridTemplateColumns: qd ? "1fr 1fr 1fr" : "1fr 1fr 1fr 1fr", gap:8 }}>
           {phase === "drilling"
             ? <button onClick={pause} style={{ padding:"14px 0", borderRadius:12, border:"none", cursor:"pointer", background:"#e67e22", color:"#fff", fontSize:14, fontWeight:800 }}>⏸ Pause</button>
             : <button onClick={resume} style={{ padding:"14px 0", borderRadius:12, border:"none", cursor:"pointer", background:"#27ae60", color:"#fff", fontSize:14, fontWeight:800 }}>▶ Resume</button>
           }
-          <button onClick={undoLastFoot} disabled={!feet.length} style={{ padding:"14px 0", borderRadius:12, border:"none", cursor:"pointer", background:"#2d5a8a", color:"#fff", fontSize:14, fontWeight:800, opacity: feet.length?1:0.4 }}>↺ Undo</button>
+          {!qd && <button onClick={undoLastFoot} disabled={!feet.length} style={{ padding:"14px 0", borderRadius:12, border:"none", cursor:"pointer", background:"#2d5a8a", color:"#fff", fontSize:14, fontWeight:800, opacity: feet.length?1:0.4 }}>↺ Undo</button>}
           <button onClick={() => setShowRefusal(true)} style={{ padding:"14px 0", borderRadius:12, border:"none", cursor:"pointer", background:"#922b21", color:"#fff", fontSize:13, fontWeight:800 }}>⛔ Refusal</button>
           <button onClick={finishDrilling} style={{ padding:"14px 0", borderRadius:12, border:"none", cursor:"pointer", background:"#2980b9", color:"#fff", fontSize:13, fontWeight:800 }}>✓ Done</button>
         </div>
       )}
 
       {/* ── Foot log (recent + expandable) ── */}
-      {feet.length > 0 && (
+      {!qd && feet.length > 0 && (
         <div style={{ background:"#071520", borderRadius:12, padding:"10px 12px" }}>
           <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:6 }}>
             <span style={{ color:"#4a7fa5", fontSize:11, fontWeight:700 }}>Drill log — {depthFt(pile)} ft logged</span>
             <div style={{ display:"flex", gap:6 }}>
+              {(phase==="drilling"||phase==="paused") && feet.length>=2 && (
+                <button onClick={redistributeLastTwo} title="Split the combined seconds of the last two feet evenly — use this right after noticing a missed tap" style={{ background:"#2d1a3a", border:"1px solid #8e44ad", borderRadius:6, color:"#c39bd3", fontSize:11, fontWeight:800, padding:"3px 8px", cursor:"pointer" }}>
+                  ⚖️ Fix last 2
+                </button>
+              )}
               {missingFeet(pile).length>0 && (
                 <button onClick={() => setShowFillSecs(true)} style={{ background:"#7a5c00", border:"1px solid #f0c040", borderRadius:6, color:"#ffd700", fontSize:11, fontWeight:800, padding:"3px 8px", cursor:"pointer" }}>
                   ⏱ Fill ({missingFeet(pile).length})
@@ -962,14 +1033,21 @@ function GroutScreen({ pile, onUpdate }) {
             </button>
             <button onClick={() => (phase==="grouting"||phase==="done") && setNumpadField("groutAt")} style={{
               padding:"12px 6px", borderRadius:12,
-              border:`2px solid ${pile.groutAt ? "#27ae60":"#8e44ad"}`,
-              background: pile.groutAt ? "#1a4a2e":"#2d1a3a", color:"#fff",
+              border:`2px solid ${pile.groutAt ? (parseFloat(pile.groutAt) < minGroutReturnDepth() ? "#e74c3c" : "#27ae60") : "#8e44ad"}`,
+              background: pile.groutAt ? (parseFloat(pile.groutAt) < minGroutReturnDepth() ? "#4a1510" : "#1a4a2e") : "#2d1a3a", color:"#fff",
               cursor: phase==="grouting"?"pointer":"default", textAlign:"center"
             }}>
-              <div style={{ fontSize:11, fontWeight:700, color: pile.groutAt?"#a8d9b8":"#c39bd3" }}>🟣 Grout Return @</div>
-              <div style={{ fontSize:20, fontWeight:900, color: pile.groutAt?"#2ecc71":"#c39bd3" }}>{pile.groutAt ? `${pile.groutAt}ft` : "—"}</div>
+              <div style={{ fontSize:11, fontWeight:700, color: pile.groutAt?(parseFloat(pile.groutAt) < minGroutReturnDepth() ? "#e74c3c" : "#a8d9b8"):"#c39bd3" }}>🟣 Grout Return @</div>
+              <div style={{ fontSize:20, fontWeight:900, color: pile.groutAt?(parseFloat(pile.groutAt) < minGroutReturnDepth() ? "#e74c3c" : "#2ecc71"):"#c39bd3" }}>{pile.groutAt ? `${pile.groutAt}ft` : "—"}</div>
             </button>
           </div>
+          {pile.groutAt && parseFloat(pile.groutAt) < minGroutReturnDepth() ? (
+            <div style={{ background:"#3d2f00", border:"1px solid #f0c040", borderRadius:10, padding:"8px 12px", color:"#ffd700", fontSize:11, fontWeight:700 }}>
+              ⚠ Grout return observed at {pile.groutAt}ft — shallower than the {minGroutReturnDepth()}ft minimum for this project. Pressure head may not have been maintained; worth a note if the contractor didn't correct it.
+            </div>
+          ) : (
+            <div style={{ color:"#4a7fa5", fontSize:10 }}>Grout return should be seen no shallower than {minGroutReturnDepth()}ft (set in Settings).</div>
+          )}
 
           {phase === "grouting" && (
             <button onClick={finishGrouting} style={{ width:"100%", padding:"18px 0", borderRadius:14, border:"none", cursor:"pointer", background:"#27ae60", color:"#fff", fontSize:18, fontWeight:900 }}>
@@ -1636,6 +1714,16 @@ function PileSettingsModal({ pile, index, onUpdate, onClose, onCreateRedrill }) 
           ))}
         </div>
 
+        <div style={{ color:"#a8c0d9", fontSize:12, fontWeight:700, marginBottom:6 }}>Drilling record</div>
+        <button disabled={settingsLocked} onClick={()=>onUpdate({...pile,quickDrill:!pile.quickDrill})} style={{
+          width:"100%", padding:"10px 6px", borderRadius:10, marginBottom:20,
+          border: pile.quickDrill ? "2px solid #4fc3f7" : "1px solid #2d4a5c",
+          background: pile.quickDrill ? "#123044" : "#0d2236", color: pile.quickDrill ? "#4fc3f7" : "#fff",
+          fontSize:12, fontWeight:700, cursor: settingsLocked ? "default" : "pointer", opacity: settingsLocked ? 0.6 : 1
+        }}>
+          {pile.quickDrill ? "⏱ Quick Drill — start/end time only (tap to use full foot log)" : "Use Quick Drill (Re-Drill) — start/end time only, no foot log"}
+        </button>
+
         <div style={{ color:"#a8c0d9", fontSize:12, fontWeight:700, marginBottom:6 }}>Installation status</div>
         <button onClick={()=>onUpdate({...pile,notInstalled:!pile.notInstalled})} style={{
           width:"100%", padding:"10px 6px", borderRadius:10, marginBottom: pile.notInstalled ? 8 : 20,
@@ -1796,9 +1884,28 @@ function PilePanel({ pile, index, onUpdate }) {
             <div style={{display:"flex",flexDirection:"column",gap:12}}>
 
               {/* ── 🔩 DRILLING ── */}
-              <Section icon="🔩" title={`Drilling${(pile.feet||[]).length?` — ${depthFt(pile)} ft`:""}`} badge={issues.missSec ? `⚠ ${issues.missSec} sec missing` : null} open={drillOpen} onToggle={()=>setDrillOpen(o=>!o)}>
+              <Section icon="🔩" title={`Drilling${(pile.feet||[]).length || (pile.quickDrill && pile.drillDepth) ? ` — ${(pile.quickDrill?parseFloat(pile.drillDepth)||0:depthFt(pile))} ft` : ""}${pile.quickDrill?" (Re-Drill)":""}`} badge={issues.missSec ? `⚠ ${issues.missSec} sec missing` : null} open={drillOpen} onToggle={()=>setDrillOpen(o=>!o)}>
                 {(phase==="setup"||phase==="drilling") ? (
                   <DrillScreen pile={pile} onUpdate={onUpdate}/>
+                ) : pile.quickDrill ? (
+                  <div style={{background:"#071520",borderRadius:12,padding:"14px"}}>
+                    <div style={{color:"#4fc3f7",fontSize:12,fontWeight:800,marginBottom:8}}>⏱ Quick Drill (Re-Drill) — no foot-by-foot log recorded</div>
+                    <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8}}>
+                      <div style={{background:"#0d2236",borderRadius:10,padding:"10px",textAlign:"center"}}>
+                        <div style={{color:"#4a7fa5",fontSize:10}}>Drill Start</div>
+                        <div style={{color:"#fff",fontSize:15,fontWeight:800}}>{pile.drillStart||"—"}</div>
+                      </div>
+                      <div style={{background:"#0d2236",borderRadius:10,padding:"10px",textAlign:"center"}}>
+                        <div style={{color:"#4a7fa5",fontSize:10}}>Drill End</div>
+                        <div style={{color:"#fff",fontSize:15,fontWeight:800}}>{pile.drillEnd||"—"}</div>
+                      </div>
+                    </div>
+                    <div style={{marginTop:10}}>
+                      <div style={{color:"#a8c0d9",fontSize:11,fontWeight:700,marginBottom:3}}>Total Drilled Depth</div>
+                      <input type="number" value={pile.drillDepth||""} onChange={e=>onUpdate({...pile,drillDepth:e.target.value})}
+                        style={{width:"100%",padding:"10px 12px",borderRadius:8,border:"1px solid #2d4a5c",background:"#0d2236",color:"#fff",fontSize:16,fontWeight:700,boxSizing:"border-box"}}/>
+                    </div>
+                  </div>
                 ) : (
                   <div style={{background:"#071520",borderRadius:12,padding:"10px 12px"}}>
                     <div style={{display:"flex",gap:6,flexWrap:"wrap",marginBottom:8}}>
@@ -1942,7 +2049,7 @@ function PilePanel({ pile, index, onUpdate }) {
               </Section>
 
               {/* ── 💉 GROUTING ── */}
-              <Section icon="💉" title="Grouting — bands & returns" badge={issues.low ? "▼ Grout below target" : issues.missBands ? `⚠ ${issues.missBands} band${issues.missBands>1?"s":""} empty` : null} badgeColor={issues.low ? "red" : undefined} open={groutOpen} onToggle={()=>setGroutOpen(o=>!o)}>
+              <Section icon="💉" title="Grouting — bands & returns" badge={issues.low ? "▼ Grout below target" : issues.shallowReturn ? "⚠ return too shallow" : issues.missBands ? `⚠ ${issues.missBands} band${issues.missBands>1?"s":""} empty` : null} badgeColor={(issues.low || issues.shallowReturn) ? "red" : undefined} open={groutOpen} onToggle={()=>setGroutOpen(o=>!o)}>
                 {(phase==="setup"||phase==="drilling") ? (
                   <div style={{color:"#4a7fa5",fontSize:13,padding:"4px 2px"}}>Grouting opens after drilling is finished — bands are built from the final drill depth.</div>
                 ) : (
@@ -2111,7 +2218,7 @@ function PileDetailPage({ piles, pileId, onUpdate, onRemove, onBack, onNavigate,
             <button onClick={()=>onRemove(pile.id)} style={{background:"#922b21",border:"none",color:"#fff",borderRadius:6,padding:"5px 10px",cursor:"pointer",fontSize:13}}>✕</button>
           </span>
         </div>
-        {showSettings && <PileSettingsModal pile={pile} index={idx} onUpdate={onUpdate} onClose={()=>setShowSettings(false)} onCreateRedrill={onAdd ? ()=>{setShowSettings(false); onAdd(`${(pile.pileNo||"").trim()} Re-Drill`.trim());} : null}/>}
+        {showSettings && <PileSettingsModal pile={pile} index={idx} onUpdate={onUpdate} onClose={()=>setShowSettings(false)} onCreateRedrill={onAdd ? ()=>{setShowSettings(false); onAdd(`${(pile.pileNo||"").trim()} Re-Drill`.trim(), {quickDrill:true});} : null}/>}
         <PilePanel key={pile.id} pile={pile} index={idx} onUpdate={onUpdate}/>
       </div>
     </div>
@@ -2392,11 +2499,12 @@ function App() {
     setPdfRendering(false);
   };
 
-  const addPile=(pileNoOverride)=>{
+  const addPile=(pileNoOverride, opts)=>{
     const np = inheritedPile(piles[piles.length-1]);
     // Used by the Re-Drill shortcut; onClick handlers pass an event, so only
     // accept an explicit string.
     if (typeof pileNoOverride === "string") np.pileNo = pileNoOverride;
+    if (opts && opts.quickDrill) np.quickDrill = true;
     setPiles(p=>[...p, np]);
     setShowProject(false);
     setOpenPileId(np.id); // jump straight into the new pile's page
@@ -2583,6 +2691,14 @@ ${rows}
                 style={{width:80,padding:"9px 10px",borderRadius:10,border:"1px solid #2d4a5c",background:"#0d2236",color:"#fff",fontSize:14,boxSizing:"border-box"}}/>
             </div>
             <div style={{ color:"#4a7fa5", fontSize:10, marginBottom:16 }}>Drives the strokes tracker & pace hints. After grout return is observed, spans above it only need factor 1.0. Blank = 1.15.</div>
+
+            <div style={{ display:"flex", alignItems:"center", gap:10, marginBottom:4 }}>
+              <span style={{ color:"#a8c0d9", fontSize:12, flex:1 }}>Min. grout return depth (ft below surface)</span>
+              <input type="number" step="1" value={project.minGroutReturn||""} placeholder="10"
+                onChange={e=>setProject({...project, minGroutReturn:e.target.value})}
+                style={{width:80,padding:"9px 10px",borderRadius:10,border:"1px solid #2d4a5c",background:"#0d2236",color:"#fff",fontSize:14,boxSizing:"border-box"}}/>
+            </div>
+            <div style={{ color:"#4a7fa5", fontSize:10, marginBottom:16 }}>Grout return shallower than this flags a heads-up (pressure head may not be maintained). Blank = 10ft.</div>
 
             <div style={{ color:"#a8c0d9", fontSize:12, fontWeight:700, marginBottom:6 }}>Data backup & team sync</div>
             <button onClick={handleExport} style={{width:"100%",padding:"12px 6px",borderRadius:10,border:"1px solid #4a7fa5",background:"transparent",color:"#4a7fa5",fontWeight:700,fontSize:13,cursor:"pointer",marginBottom:8}}>💾 Export all data to file</button>
