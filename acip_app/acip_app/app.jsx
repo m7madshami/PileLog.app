@@ -1666,7 +1666,76 @@ function PileDetailsForm({ pile, onUpdate }) {
 // ── Pile Panel ────────────────────────────────────────────────────────────────
 // Pile settings modal — pile type, recording interval, grout spacing, and the
 // Not Installed toggle. Shared by the pile detail page header.
-function PileSettingsModal({ pile, index, onUpdate, onClose, onCreateRedrill }) {
+// ── Copy seconds/torque from another pile ───────────────────────────────────
+// For gaps left by a missed stopwatch tap — fills the current pile's blank
+// seconds/torque from a chosen source pile's readings AT THE SAME DEPTH,
+// since drilling speed and high-torque zones tend to repeat across a site.
+// Never overwrites a value the inspector actually recorded, and only offers
+// piles that have at least one foot in common with this pile.
+const applyCopySecondsTorque = (target, source) => {
+  const srcByFoot = {};
+  (source.feet||[]).forEach(f => { srcByFoot[f.foot] = f; });
+  let filledSec = 0, filledKnm = 0;
+  const newFeet = (target.feet||[]).map(f => {
+    const src = srcByFoot[f.foot];
+    if (!src) return f;
+    let nf = f;
+    if ((f.seconds == null || f.seconds === 0) && src.seconds != null && src.seconds !== 0) {
+      nf = { ...nf, seconds: src.seconds }; filledSec++;
+    }
+    if (!f.knm && src.knm) {
+      nf = { ...nf, knm: src.knm }; filledKnm++;
+    }
+    return nf;
+  });
+  return { newFeet, filledSec, filledKnm };
+};
+
+function CopySecondsModal({ pile, projectPiles, onUpdate, onClose }) {
+  const targetFeet = new Set((pile.feet||[]).map(f=>f.foot));
+  const candidates = (projectPiles||[])
+    .filter(p => p.id !== pile.id && (p.feet||[]).length)
+    .map(p => {
+      const overlap = (p.feet||[]).filter(f=>targetFeet.has(f.foot)).length;
+      return { p, overlap };
+    })
+    .filter(c => c.overlap > 0)
+    .sort((a,b) => b.overlap - a.overlap);
+
+  return (
+    <div style={{ position:"fixed", top:0, left:0, width:"100vw", height:"100dvh", background:"rgba(0,0,0,0.85)", zIndex:310, display:"flex", alignItems:"center", justifyContent:"center", padding:20 }} onClick={onClose}>
+      <div style={{ background:"#132536", borderRadius:18, padding:20, maxWidth:380, width:"100%", maxHeight:"80vh", overflowY:"auto" }} onClick={e=>e.stopPropagation()}>
+        <div style={{ color:"#fff", fontWeight:900, fontSize:16, marginBottom:6 }}>📋 Copy Seconds / Torque</div>
+        <div style={{ color:"#a8c0d9", fontSize:12, marginBottom:14, lineHeight:1.4 }}>
+          Fills THIS pile's missing seconds/torque from another pile's readings at the same depth. Only blank entries are filled — anything already recorded stays untouched.
+        </div>
+        {candidates.length === 0 ? (
+          <div style={{ color:"#4a7fa5", fontSize:12, textAlign:"center", padding:"20px 0" }}>No other piles in this project share a foot depth with this one yet.</div>
+        ) : candidates.map(({p, overlap}) => (
+          <button key={p.id} onClick={() => {
+            const { newFeet, filledSec, filledKnm } = applyCopySecondsTorque(pile, p);
+            if (filledSec === 0 && filledKnm === 0) { alert("Nothing to fill — every matching foot already has a value."); return; }
+            onUpdate({ ...pile, feet: newFeet });
+            onClose();
+          }} style={{
+            width:"100%", textAlign:"left", padding:"12px 14px", borderRadius:12, marginBottom:8,
+            border:"1px solid #2d4a5c", background:"#0d2236", color:"#fff", cursor:"pointer"
+          }}>
+            <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center" }}>
+              <span style={{ fontWeight:800, fontSize:14 }}>{p.pileNo || "(no number)"}</span>
+              <span style={{ color:"#4fc3f7", fontSize:11, fontWeight:700 }}>{overlap} ft in common</span>
+            </div>
+            <div style={{ color:"#4a7fa5", fontSize:11, marginTop:2 }}>{p.__dayDate} · {depthFt(p)} ft drilled</div>
+          </button>
+        ))}
+        <button onClick={onClose} style={{ width:"100%", padding:12, borderRadius:10, border:"none", background:"transparent", color:"#6a8caf", fontSize:12, cursor:"pointer", marginTop:4 }}>Cancel</button>
+      </div>
+    </div>
+  );
+}
+
+function PileSettingsModal({ pile, index, projectPiles, onUpdate, onClose, onCreateRedrill }) {
+  const [showCopy, setShowCopy] = useState(false);
   const phase = pile.groutEnd?"complete":pile.groutStart?"grouting":pile.drillEnd?"grouting-ready":pile.drillStart?"drilling":"setup";
   // Settings (recording interval, ACIP/RI) can only be changed before
   // drilling starts — changing mid-pile would corrupt the depth math.
@@ -1716,13 +1785,22 @@ function PileSettingsModal({ pile, index, onUpdate, onClose, onCreateRedrill }) 
 
         <div style={{ color:"#a8c0d9", fontSize:12, fontWeight:700, marginBottom:6 }}>Drilling record</div>
         <button disabled={settingsLocked} onClick={()=>onUpdate({...pile,quickDrill:!pile.quickDrill})} style={{
-          width:"100%", padding:"10px 6px", borderRadius:10, marginBottom:20,
+          width:"100%", padding:"10px 6px", borderRadius:10, marginBottom:10,
           border: pile.quickDrill ? "2px solid #4fc3f7" : "1px solid #2d4a5c",
           background: pile.quickDrill ? "#123044" : "#0d2236", color: pile.quickDrill ? "#4fc3f7" : "#fff",
           fontSize:12, fontWeight:700, cursor: settingsLocked ? "default" : "pointer", opacity: settingsLocked ? 0.6 : 1
         }}>
           {pile.quickDrill ? "⏱ Quick Drill — start/end time only (tap to use full foot log)" : "Use Quick Drill (Re-Drill) — start/end time only, no foot log"}
         </button>
+        {!pile.quickDrill && (pile.feet||[]).length > 0 && (
+          <button onClick={()=>setShowCopy(true)} style={{
+            width:"100%", padding:"10px 6px", borderRadius:10, marginBottom:20,
+            border:"1px solid #2d6a9f", background:"transparent", color:"#4fc3f7", fontSize:12, fontWeight:700, cursor:"pointer"
+          }}>
+            📋 Copy seconds/torque from another pile
+          </button>
+        )}
+        {showCopy && <CopySecondsModal pile={pile} projectPiles={projectPiles} onUpdate={onUpdate} onClose={()=>setShowCopy(false)}/>}
 
         <div style={{ color:"#a8c0d9", fontSize:12, fontWeight:700, marginBottom:6 }}>Installation status</div>
         <button onClick={()=>onUpdate({...pile,notInstalled:!pile.notInstalled})} style={{
@@ -1925,23 +2003,27 @@ function PilePanel({ pile, index, onUpdate }) {
                     </div>
                     {redistributeMode && (
                     <div style={{color:"#c39bd3",fontSize:11,marginBottom:8,lineHeight:1.4}}>
-                      Select a run of consecutive feet below, then split their combined seconds evenly. Use this if the stopwatch got tapped late or early on some taps but the drilling was actually steady.
+                      Tap the first foot, then the last foot — everything between fills in automatically. Then split their combined seconds evenly. Use this if the stopwatch got tapped late or early on some taps but the drilling was actually steady.
                     </div>
                   )}
                   <div ref={footListRef} style={{maxHeight:260,overflowY:"auto"}}>
                     {(pile.feet||[]).map((f,fi)=>{
                       const hi=f.knm&&parseInt(f.knm)>75;
                       const selected = redistributeSel.includes(f.foot);
-                      // Only allow selecting a contiguous run — tapping a foot that isn't
-                      // adjacent to the current selection starts a new selection instead.
+                      // Tap the first foot in the range, then the last — every foot
+                      // between fills in automatically (no need to tap each one).
+                      // Tapping the same start point again clears it; tapping
+                      // anywhere once a range is set starts a fresh selection.
                       const toggleSelect = () => {
                         setRedistributeSel(sel => {
-                          if (sel.includes(f.foot)) return sel.filter(x=>x!==f.foot);
                           if (sel.length === 0) return [f.foot];
-                          const idxs = sel.map(s => pile.feet.findIndex(pf=>pf.foot===s));
-                          const minI = Math.min(...idxs), maxI = Math.max(...idxs);
-                          if (fi === minI-1 || fi === maxI+1) return [...sel, f.foot].sort((a,b)=>a-b);
-                          return [f.foot]; // non-adjacent tap restarts the selection
+                          if (sel.length === 1) {
+                            const startIdx = pile.feet.findIndex(pf=>pf.foot===sel[0]);
+                            if (fi === startIdx) return []; // tapped the start again — clear
+                            const lo = Math.min(startIdx, fi), hi2 = Math.max(startIdx, fi);
+                            return pile.feet.slice(lo, hi2+1).map(pf=>pf.foot);
+                          }
+                          return [f.foot]; // range already set — start a new selection
                         });
                       };
                       if (redistributeMode) {
@@ -2020,7 +2102,9 @@ function PilePanel({ pile, index, onUpdate }) {
                     );
                   })()}
                   {redistributeMode && redistributeSel.length===1 && (
-                    <div style={{marginTop:8,color:"#7a6a8a",fontSize:11,textAlign:"center"}}>Select at least one more adjacent foot to redistribute.</div>
+                    <div style={{marginTop:8,color:"#7a6a8a",fontSize:11,textAlign:"center"}}>
+                      Now tap the last foot in the range. <span onClick={()=>setRedistributeSel([])} style={{color:"#c39bd3",textDecoration:"underline",cursor:"pointer"}}>Clear</span>
+                    </div>
                   )}
 
                   {!redistributeMode && (
@@ -2165,7 +2249,7 @@ function PileListPage({ piles, project, onOpen, onAdd, onRemove }) {
 }
 
 // ── Pile Detail Page (dedicated page for one pile, with Prev/Next nav) ─────────
-function PileDetailPage({ piles, pileId, onUpdate, onRemove, onBack, onNavigate, onAdd }) {
+function PileDetailPage({ piles, projectPiles, pileId, onUpdate, onRemove, onBack, onNavigate, onAdd }) {
   const idx = piles.findIndex(p => p.id === pileId);
   const pile = piles[idx];
   const [showSettings, setShowSettings] = useState(false);
@@ -2218,7 +2302,7 @@ function PileDetailPage({ piles, pileId, onUpdate, onRemove, onBack, onNavigate,
             <button onClick={()=>onRemove(pile.id)} style={{background:"#922b21",border:"none",color:"#fff",borderRadius:6,padding:"5px 10px",cursor:"pointer",fontSize:13}}>✕</button>
           </span>
         </div>
-        {showSettings && <PileSettingsModal pile={pile} index={idx} onUpdate={onUpdate} onClose={()=>setShowSettings(false)} onCreateRedrill={onAdd ? ()=>{setShowSettings(false); onAdd(`${(pile.pileNo||"").trim()} Re-Drill`.trim(), {quickDrill:true});} : null}/>}
+        {showSettings && <PileSettingsModal pile={pile} index={idx} projectPiles={projectPiles} onUpdate={onUpdate} onClose={()=>setShowSettings(false)} onCreateRedrill={onAdd ? ()=>{setShowSettings(false); onAdd(`${(pile.pileNo||"").trim()} Re-Drill`.trim(), {quickDrill:true});} : null}/>}
         <PilePanel key={pile.id} pile={pile} index={idx} onUpdate={onUpdate}/>
       </div>
     </div>
@@ -2284,6 +2368,10 @@ function App() {
 
   const active = store.projects.find(e => e.id === store.activeId) || store.projects[0];
   const activeDay = active.days.find(d => d.id === active.activeDayId) || active.days[active.days.length-1];
+  // Flat list of every pile in this project, across all days — lets the
+  // "copy seconds/torque" feature reference any prior pile at the same site,
+  // not just today's.
+  const projectPiles = active.days.flatMap(d => d.piles.map(p => ({ ...p, __dayDate: d.date })));
   // Project info lives PER DAY — equipment/inspector can change between days,
   // and editing it must never rewrite already-generated logs from past days.
   // (entry.project remains as the fallback/template for older data.)
@@ -2736,6 +2824,7 @@ ${rows}
         {openPileId ? (
           <PileDetailPage
             piles={piles}
+            projectPiles={projectPiles}
             pileId={openPileId}
             onUpdate={u=>updatePile(openPileId,u)}
             onRemove={removePile}
