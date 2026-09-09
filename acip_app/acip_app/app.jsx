@@ -145,10 +145,16 @@ const calcDerived = (pile, project) => {
   // Tip Elevation = Ground Elevation − Drilled Depth
   const tipElevation = pile.tipElevation ||
     ((!isNaN(groundEl) && drilledFt) ? String(round2(groundEl - drilledFt)) : "");
-  const capThickness = parseFloat(pile.capThickness);
-  // Cutoff Elevation = Ground Elevation − Pile Cap Thickness
+  const capThicknessRaw = parseFloat(pile.capThickness);
+  // Cutoff Elevation = Ground Elevation − Pile Cap Thickness (or entered directly)
   const cutoffElevation = pile.cutoffElevation ||
-    ((!isNaN(groundEl) && !isNaN(capThickness)) ? String(round2(groundEl - capThickness)) : "");
+    ((!isNaN(groundEl) && !isNaN(capThicknessRaw)) ? String(round2(groundEl - capThicknessRaw)) : "");
+  // Pile Cap Thickness can likewise be derived FROM a directly-entered Cutoff
+  // Elevation — the contractor sometimes gives one, sometimes the other, and
+  // either should be enough to compute the rest.
+  const cutoffNumForCap = parseFloat(cutoffElevation);
+  const capThickness = pile.capThickness ||
+    ((!isNaN(groundEl) && !isNaN(cutoffNumForCap)) ? String(round2(groundEl - cutoffNumForCap)) : "");
   // Pile Length = Cutoff Elevation − Tip Elevation
   const cutoffNum = parseFloat(cutoffElevation), tipNum = parseFloat(tipElevation);
   const pileLength = pile.pileLength ||
@@ -160,7 +166,7 @@ const calcDerived = (pile, project) => {
     ((totalStrokes && calibFactor) ? String(round2(parseFloat(totalStrokes) * calibFactor)) : "");
   const groutFactor = pile.groutFactor ||
     ((actual && theoretical && parseFloat(theoretical) > 0) ? String(round2(parseFloat(actual) / parseFloat(theoretical))) : "");
-  return { drillDepth, theoretical, totalStrokes, actual, groutFactor, calibFactor, tipElevation, cutoffElevation, pileLength };
+  return { drillDepth, theoretical, totalStrokes, actual, groutFactor, calibFactor, tipElevation, cutoffElevation, capThickness, pileLength };
 };
 
 // ── KNm Torque Slider (vertical) ──────────────────────────────────────────────
@@ -1638,7 +1644,7 @@ function PileDetailsForm({ pile, onUpdate }) {
       <Field obj={pile} set={set} label="Pile Diameter (in)" field="pileDiameter" type="number"/>
       <Field obj={pile} set={set} label="Ground Elevation (ft)" field="groundElevation" type="number"/>
       <Field obj={pile} set={set} label="Pile Capacity (kips)" field="pileCapacity" type="number"/>
-      <Field obj={pile} set={set} label="Pile Cap Thickness (ft)" field="capThickness" type="number"/>
+      <ComputedField label="Pile Cap Thickness (ft)" field="capThickness" pile={pile} onUpdate={onUpdate} computedValue={derived.capThickness}/>
       <ComputedField label="Pile Length (ft)" field="pileLength" pile={pile} onUpdate={onUpdate} computedValue={derived.pileLength}/>
       <Field obj={pile} set={set} label="Drill Depth (ft)" field="drillDepth" type="number"/>
       <ComputedField label="Tip Elevation (ft)" field="tipElevation" pile={pile} onUpdate={onUpdate} computedValue={derived.tipElevation}/>
@@ -1700,7 +1706,12 @@ function CopySecondsModal({ pile, projectPiles, onUpdate, onClose }) {
       return { p, overlap };
     })
     .filter(c => c.overlap > 0)
-    .sort((a,b) => b.overlap - a.overlap);
+    // Most recent day first (falls back to pile id, newer first, for same-day piles).
+    .sort((a,b) => {
+      const da = new Date(a.p.__dayDate), db = new Date(b.p.__dayDate);
+      const dt = (!isNaN(db) && !isNaN(da)) ? db - da : 0;
+      return dt !== 0 ? dt : (b.p.id - a.p.id);
+    });
 
   return (
     <div style={{ position:"fixed", top:0, left:0, width:"100vw", height:"100dvh", background:"rgba(0,0,0,0.85)", zIndex:310, display:"flex", alignItems:"center", justifyContent:"center", padding:20 }} onClick={onClose}>
@@ -2718,7 +2729,7 @@ ${rows}
           <button onClick={handlePDF} disabled={generating} style={{padding:"8px 13px",borderRadius:7,border:"none",cursor:"pointer",background:generating?"#444":"#e67e22",color:"#fff",fontWeight:700,fontSize:13}}>
             {generating?"…":"📄 PDF"}
           </button>
-          <button onClick={()=>setSunMode(s=>!s)} style={{padding:"8px 13px",borderRadius:7,border:"1px solid #2d4a5c",cursor:"pointer",background:sunMode?"#ffd700":"transparent",color:sunMode?"#333":"#a8c0d9",fontSize:13,fontWeight:700}}>{sunMode?"🌙":"☀️"}</button>
+          <button onClick={()=>setSunMode(s=>!s)} style={{padding:"8px 13px",borderRadius:7,border:"1px solid #2d4a5c",cursor:"pointer",background:sunMode?"#ffd700":"transparent",color:sunMode?"#333":"#a8c0d9",fontSize:13,fontWeight:700,filter:sunMode?"invert(1) hue-rotate(180deg)":"none"}}>{sunMode?"🌙":"☀️"}</button>
           <button onClick={()=>setShowMenu(true)} style={{padding:"8px 13px",borderRadius:7,border:"1px solid #2d4a5c",cursor:"pointer",background:"transparent",color:"#fff",fontSize:15,fontWeight:800}}>☰ Menu</button>
         </div>
       </div>
@@ -2753,9 +2764,8 @@ ${rows}
             </button>
 
             <div style={{ color:"#4a7fa5", fontSize:11, fontWeight:800, marginBottom:6 }}>ACTIONS</div>
-            <button onClick={()=>{setShowProject(s=>!s);setShowMenu(false);}} style={{width:"100%",padding:"11px 12px",borderRadius:10,border:"1px solid #2d4a5c",background:"transparent",color:"#a8c0d9",fontSize:13,fontWeight:700,cursor:"pointer",marginBottom:8,textAlign:"left"}}>📋 Show / hide project info</button>
             <button onClick={()=>{handleSummary();setShowMenu(false);}} disabled={generating} style={{width:"100%",padding:"11px 12px",borderRadius:10,border:"1px solid #e67e22",background:"transparent",color:"#e6a35c",fontSize:13,fontWeight:700,cursor:"pointer",marginBottom:8,textAlign:"left"}}>📑 Summary table (Word)</button>
-            <button onClick={()=>{setSunMode(s=>!s);setShowMenu(false);}} style={{width:"100%",padding:"11px 12px",borderRadius:10,border:"1px solid #2d4a5c",background:sunMode?"#ffd700":"transparent",color:sunMode?"#333":"#a8c0d9",fontSize:13,fontWeight:700,cursor:"pointer",marginBottom:8,textAlign:"left"}}>{sunMode?"🌙 Normal mode":"☀️ Sunlight mode"}</button>
+            <button onClick={()=>{setSunMode(s=>!s);setShowMenu(false);}} style={{width:"100%",padding:"11px 12px",borderRadius:10,border:"1px solid #2d4a5c",background:sunMode?"#ffd700":"transparent",color:sunMode?"#333":"#a8c0d9",fontSize:13,fontWeight:700,cursor:"pointer",marginBottom:8,textAlign:"left",filter:sunMode?"invert(1) hue-rotate(180deg)":"none"}}>{sunMode?"🌙 Normal mode":"☀️ Sunlight mode"}</button>
             <button onClick={()=>{setShowAppSettings(true);setShowMenu(false);}} style={{width:"100%",padding:"11px 12px",borderRadius:10,border:"1px solid #2d4a5c",background:"transparent",color:"#a8c0d9",fontSize:13,fontWeight:700,cursor:"pointer",textAlign:"left"}}>⚙️ Settings (backup / restore)</button>
           </div>
         </div>
@@ -2820,6 +2830,15 @@ ${rows}
           </button>
         </div>
 
+        <div onClick={()=>setShowProject(s=>!s)} style={{
+          display:"flex", alignItems:"center", gap:8, cursor:"pointer",
+          background:"#132536", border:"1px solid #1a3a5c", borderRadius:12,
+          padding:"12px 14px", marginBottom: showProject ? 0 : 10
+        }}>
+          <span style={{fontSize:16}}>📋</span>
+          <span style={{color:"#fff",fontSize:14,fontWeight:800,flex:1}}>Project Information</span>
+          <span style={{color:"#4fc3f7",fontSize:13}}>{showProject?"▲":"▼"}</span>
+        </div>
         {showProject&&<ProjectForm project={project} onChange={setProject}/>}
         {openPileId ? (
           <PileDetailPage
