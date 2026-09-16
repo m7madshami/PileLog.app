@@ -314,9 +314,75 @@ const missingFeet = (pile) => (pile.feet||[]).filter(f => f.seconds == null || f
 // observed. Theoretical volume per span = π r² × span; strokes = volume ÷ pump
 // calibration factor. Band stroke entries are cumulative counter readings, so
 // the strokes placed over a span = this band's reading − the deeper band's.
+// In-memory mirror of the store, kept fresh by App on every state change.
+// Helpers like dayProjectInfo() run on hot paths (once per pile in the list,
+// repeatedly while grouting) — re-parsing the full saved JSON (which can be
+// months of data) on every call was a real source of lag. Reading this plain
+// object reference instead is effectively free.
+let __storeCache = null;
+
+// ── Split storage ────────────────────────────────────────────────────────────
+// localStorage can only overwrite a whole entry at once — there's no partial
+// "patch just this pile" write. So instead of one giant entry holding every
+// day ever logged, each day's piles/project-info get their own small entry
+// (acip_day_<id>), and a tiny index entry (acip_index) just lists which days
+// exist. Saving an edit only rewrites the ONE day that changed — the index is
+// cheap to rewrite every time, and untouched days are never touched on disk.
+const STORE_INDEX_KEY = "acip_index";
+const dayKey = (id) => `acip_day_${id}`;
+let __lastSavedDayRefs = new Map(); // dayId -> day object reference last written to disk
+
+const loadSplitStore = () => {
+  const idx = JSON.parse(localStorage.getItem(STORE_INDEX_KEY));
+  if (!idx || !Array.isArray(idx.projects) || !idx.projects.length) return null;
+  const projects = idx.projects.map(e => ({
+    id: e.id,
+    project: e.project,
+    activeDayId: e.activeDayId,
+    days: (e.days||[]).map(dMeta => {
+      let content = null;
+      try { content = JSON.parse(localStorage.getItem(dayKey(dMeta.id))); } catch(err) {}
+      return {
+        id: dMeta.id,
+        date: dMeta.date,
+        projectInfo: (content && content.projectInfo) || e.project || emptyProject(),
+        piles: (content && Array.isArray(content.piles) && content.piles.length) ? content.piles : [emptyPile()]
+      };
+    })
+  })).filter(e => e.days.length);
+  return projects.length ? { projects, activeId: idx.activeId } : null;
+};
+
+// Writes the index (always — it's tiny) and only the day-content entries
+// whose object reference actually changed since the last save. Every edit
+// path in this app rebuilds a new object only for the day being touched
+// (see setPiles/setProject), so unrelated days keep their exact reference
+// and are skipped here for free.
+const saveSplitStore = (store) => {
+  const idx = {
+    activeId: store.activeId,
+    projects: store.projects.map(e => ({
+      id: e.id, project: e.project, activeDayId: e.activeDayId,
+      days: e.days.map(d => ({ id: d.id, date: d.date }))
+    }))
+  };
+  localStorage.setItem(STORE_INDEX_KEY, JSON.stringify(idx));
+  const seen = new Set();
+  store.projects.forEach(e => e.days.forEach(d => {
+    seen.add(d.id);
+    if (__lastSavedDayRefs.get(d.id) !== d) {
+      localStorage.setItem(dayKey(d.id), JSON.stringify({ projectInfo: d.projectInfo, piles: d.piles }));
+      __lastSavedDayRefs.set(d.id, d);
+    }
+  }));
+  // Clean up entries for days that were deleted
+  for (const id of Array.from(__lastSavedDayRefs.keys())) {
+    if (!seen.has(id)) { try { localStorage.removeItem(dayKey(id)); } catch(e) {} __lastSavedDayRefs.delete(id); }
+  }
+};
 const dayProjectInfo = () => {
   try {
-    const s = JSON.parse(localStorage.getItem("acip_store"));
+    const s = __storeCache || loadSplitStore();
     const act = s.projects.find(e=>e.id===s.activeId) || s.projects[0];
     const day = act.days.find(d=>d.id===act.activeDayId) || act.days[act.days.length-1];
     return (day && day.projectInfo) || act.project || {};
@@ -1074,13 +1140,7 @@ function GroutScreen({ pile, onUpdate }) {
             <>
             {(() => {
               // Live computed summary — read active DAY's calibration from the store
-              let proj = {};
-              try {
-                const s = JSON.parse(localStorage.getItem("acip_store"));
-                const act = s && s.projects && (s.projects.find(e=>e.id===s.activeId) || s.projects[0]);
-                const day = act && act.days && (act.days.find(d=>d.id===act.activeDayId) || act.days[act.days.length-1]);
-                proj = (day && day.projectInfo) || (act && act.project) || {};
-              } catch(e) {}
+              const proj = dayProjectInfo();
               const d = calcDerived(pile, proj);
               return (d.totalStrokes || d.theoretical) ? (
                 <div style={{ background:"#071520", borderRadius:12, padding:"10px 12px", display:"grid", gridTemplateColumns:"1fr 1fr 1fr 1fr", gap:6, textAlign:"center" }}>
@@ -1625,12 +1685,7 @@ function PileDetailsForm({ pile, onUpdate }) {
   const set=(f,v)=>onUpdate({...pile,[f]:v});
   const inp=FIELD_INP;
   const lbl=FIELD_LBL;
-  let project = {};
-  try {
-    const s = JSON.parse(localStorage.getItem("acip_store"));
-    const act = s && s.projects && (s.projects.find(e=>e.id===s.activeId) || s.projects[0]);
-    project = (act && act.project) || {};
-  } catch(e) {}
+  const project = dayProjectInfo();
   const derived = calcDerived(pile, project);
   return (
     <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:"0 12px"}}>
@@ -2354,10 +2409,26 @@ function App() {
   };
 
   const [store, setStore] = useState(() => {
+    // 1) New split-storage format — the normal path once migrated.
+    try {
+      const split = loadSplitStore();
+      if (split) {
+        const result = { ...split, projects: split.projects.map(normalizeEntry) };
+        // Seed the "last saved" references so the very first save doesn't
+        // think every day changed and rewrite them all unnecessarily.
+        result.projects.forEach(e => e.days.forEach(d => __lastSavedDayRefs.set(d.id, d)));
+        return result;
+      }
+    } catch(e) {}
+    // 2) Legacy single-blob format — migrate it into split storage once.
+    // The old key is deliberately left in place afterward (never deleted) as
+    // a passive safety net; the app never reads it again once migrated.
     try {
       const s = JSON.parse(localStorage.getItem("acip_store"));
       if (s && Array.isArray(s.projects) && s.projects.length) {
-        return { ...s, projects: s.projects.map(normalizeEntry) };
+        const result = { ...s, projects: s.projects.map(normalizeEntry) };
+        try { saveSplitStore(result); } catch(e) {}
+        return result;
       }
     } catch(e) {}
     // Migrate legacy single-project data if present
@@ -2366,16 +2437,43 @@ function App() {
       const pl = JSON.parse(localStorage.getItem("acip_piles"));
       if (p || (Array.isArray(pl) && pl.length)) {
         const entry = normalizeEntry({ id: Date.now(), project: p || emptyProject(), piles: (Array.isArray(pl)&&pl.length)?pl:[emptyPile()] });
-        return { projects: [entry], activeId: entry.id };
+        const result = { projects: [entry], activeId: entry.id };
+        try { saveSplitStore(result); } catch(e) {}
+        return result;
       }
     } catch(e) {}
     const entry = normalizeEntry({ id: Date.now(), project: emptyProject() });
     return { projects: [entry], activeId: entry.id };
   });
 
+  // Saving used to re-serialize and write the ENTIRE store (every pile, every
+  // foot, every day) on every single keystroke or tap — with months of data
+  // that full rewrite is real work, and doing it per-keystroke is what caused
+  // the lag. Debounce it instead: wait for a short pause in activity, then
+  // write once. Flush immediately if the tab is hidden/closed so a save is
+  // never lost mid-debounce.
+  const saveTimerRef = useRef(null);
+  const latestStoreRef = useRef(store);
+  latestStoreRef.current = store;
+  __storeCache = store; // keep the in-memory cache fresh for dayProjectInfo() — cheap, unlike the disk write below
+  const flushSave = () => {
+    if (saveTimerRef.current) { clearTimeout(saveTimerRef.current); saveTimerRef.current = null; }
+    try { saveSplitStore(latestStoreRef.current); } catch(e) {}
+  };
   useEffect(() => {
-    try { localStorage.setItem("acip_store", JSON.stringify(store)); } catch(e) {}
+    if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
+    saveTimerRef.current = setTimeout(flushSave, 400);
+    return () => { if (saveTimerRef.current) clearTimeout(saveTimerRef.current); };
   }, [store]);
+  useEffect(() => {
+    const onHide = () => flushSave();
+    document.addEventListener("visibilitychange", onHide);
+    window.addEventListener("pagehide", onHide);
+    return () => {
+      document.removeEventListener("visibilitychange", onHide);
+      window.removeEventListener("pagehide", onHide);
+    };
+  }, []);
 
   const active = store.projects.find(e => e.id === store.activeId) || store.projects[0];
   const activeDay = active.days.find(d => d.id === active.activeDayId) || active.days[active.days.length-1];
