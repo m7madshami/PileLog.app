@@ -1287,7 +1287,7 @@ async function generatePDF(project, piles) {
     // Precompute derived values once per pile (was per-row — slow with many piles)
     const derivedByPile = pagePiles.map(p => {
       const d = calcDerived(p, project);
-      return { drillDepth:d.drillDepth, theoreticalVol:d.theoretical, totalStrokes:d.totalStrokes, actualVolume:d.actual, groutFactor:d.groutFactor, tipElevation:d.tipElevation, cutoffElevation:d.cutoffElevation, pileLength:d.pileLength };
+      return { drillDepth:d.drillDepth, theoreticalVol:d.theoretical, totalStrokes:d.totalStrokes, actualVolume:d.actual, groutFactor:d.groutFactor, tipElevation:d.tipElevation, cutoffElevation:d.cutoffElevation, capThickness:d.capThickness, pileLength:d.pileLength };
     });
     mainRows.forEach((r,ri)=>{
       const y=tTop+(ri+1)*rowH;
@@ -1701,11 +1701,11 @@ function PileDetailsForm({ pile, onUpdate }) {
       <Field obj={pile} set={set} label="Pile Capacity (kips)" field="pileCapacity" type="number"/>
       <ComputedField label="Pile Cap Thickness (ft)" field="capThickness" pile={pile} onUpdate={onUpdate} computedValue={derived.capThickness}/>
       <ComputedField label="Pile Length (ft)" field="pileLength" pile={pile} onUpdate={onUpdate} computedValue={derived.pileLength}/>
-      <Field obj={pile} set={set} label="Drill Depth (ft)" field="drillDepth" type="number"/>
+      <ComputedField label="Drill Depth (ft)" field="drillDepth" pile={pile} onUpdate={onUpdate} computedValue={derived.drillDepth}/>
       <ComputedField label="Tip Elevation (ft)" field="tipElevation" pile={pile} onUpdate={onUpdate} computedValue={derived.tipElevation}/>
       <ComputedField label="Cutoff Elevation (ft)" field="cutoffElevation" pile={pile} onUpdate={onUpdate} computedValue={derived.cutoffElevation}/>
       <ComputedField label="Theoretical Vol. (ft³)" field="theoreticalVol" pile={pile} onUpdate={onUpdate} computedValue={derived.theoretical}/>
-      <Field obj={pile} set={set} label="Total Strokes Pumped" field="totalStrokes" type="number"/>
+      <ComputedField label="Total Strokes Pumped" field="totalStrokes" pile={pile} onUpdate={onUpdate} computedValue={derived.totalStrokes}/>
       <ComputedField label="Actual Volume (ft³)" field="actualVolume" pile={pile} onUpdate={onUpdate} computedValue={derived.actual} unit={derived.calibFactor?"":" (needs pump calib.)"}/>
       <ComputedField label="Grout Factor" field="groutFactor" pile={pile} onUpdate={onUpdate} computedValue={derived.groutFactor}/>
       <ComputedField label="Reinforcing Steel" field="reinfSteel" pile={pile} onUpdate={onUpdate} computedValue={pile.pileType||""} type="text"/><Field obj={pile} set={set} label="Grout Strength" field="groutStrength"/>
