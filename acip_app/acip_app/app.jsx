@@ -98,6 +98,7 @@ const emptyPile = () => ({
   pileNo: "",
   drillStart: null, drillEnd: null, groutStart: null, groutEnd: null,
   drillStartEpoch: null, footStartEpoch: null, pausedAt: null,
+  calibFactorSnapshot: "", calibDateSnapshot: "", // pump calibration locked in at Grout End (see calcDerived)
   feet: [],
   groutBands: [],
   refusalDepth: null,
@@ -161,7 +162,15 @@ const calcDerived = (pile, project) => {
     ((!isNaN(cutoffNum) && !isNaN(tipNum)) ? String(round2(cutoffNum - tipNum)) : "");
   const groundBand = (pile.groutBands||[]).find(b => b.depth === 0);
   const totalStrokes = pile.totalStrokes || (groundBand?.strokes ? String(groundBand.strokes) : "");
-  const calibFactor = parseFloat(project.pumpCalibFactor) > 0 ? parseFloat(project.pumpCalibFactor) : null;
+  // Calibration: once a pile is grouted (Grout End set), it locks in whatever
+  // calibration factor was active AT THAT MOMENT (calibFactorSnapshot, stamped
+  // in GroutScreen's finish handlers) so a later mid-day recalibration never
+  // rewrites a pile that's already done. A pile still in progress (or an old
+  // pile logged before this feature existed, with no snapshot) falls back to
+  // the day's current Settings value, same as before.
+  const snap = parseFloat(pile.calibFactorSnapshot);
+  const calibFactor = (pile.groutEnd && snap > 0) ? snap
+    : (parseFloat(project.pumpCalibFactor) > 0 ? parseFloat(project.pumpCalibFactor) : null);
   const actual = pile.actualVolume ||
     ((totalStrokes && calibFactor) ? String(round2(parseFloat(totalStrokes) * calibFactor)) : "");
   const groutFactor = pile.groutFactor ||
@@ -975,20 +984,27 @@ function GroutScreen({ pile, onUpdate }) {
   const phase = !pile.groutStart ? "idle" : !pile.groutEnd ? "grouting" : "done";
 
   const startGrouting = () => onUpdate({ ...pile, groutStart: nowStr() });
+  // Lock in today's calibration the moment a pile finishes grouting, so a
+  // later mid-day recalibration doesn't retroactively change this pile's
+  // Actual Volume / Grout Factor (see calcDerived).
+  const calibSnapshotFields = () => {
+    const proj = dayProjectInfo();
+    return { calibFactorSnapshot: proj.pumpCalibFactor || "", calibDateSnapshot: proj.lastCalibDate || "" };
+  };
   const finishGrouting = () => {
     // Guard: don't let a pile finish without its pile number
     if (!pile.pileNo || !pile.pileNo.trim()) { setWarnPileNo(""); setShowPileNoWarn(true); return; }
     saveTypeMemory(pile);
-    onUpdate({ ...pile, groutEnd: nowStr() });
+    onUpdate({ ...pile, groutEnd: nowStr(), ...calibSnapshotFields() });
   };
   const finishWithPileNo = () => {
     saveTypeMemory(pile);
-    onUpdate({ ...pile, pileNo: warnPileNo.trim(), groutEnd: nowStr() });
+    onUpdate({ ...pile, pileNo: warnPileNo.trim(), groutEnd: nowStr(), ...calibSnapshotFields() });
     setShowPileNoWarn(false);
   };
   const finishWithoutPileNo = () => {
     saveTypeMemory(pile);
-    onUpdate({ ...pile, groutEnd: nowStr() });
+    onUpdate({ ...pile, groutEnd: nowStr(), ...calibSnapshotFields() });
     setShowPileNoWarn(false);
   };
 
@@ -1706,7 +1722,7 @@ function PileDetailsForm({ pile, onUpdate }) {
       <ComputedField label="Cutoff Elevation (ft)" field="cutoffElevation" pile={pile} onUpdate={onUpdate} computedValue={derived.cutoffElevation}/>
       <ComputedField label="Theoretical Vol. (ft³)" field="theoreticalVol" pile={pile} onUpdate={onUpdate} computedValue={derived.theoretical}/>
       <ComputedField label="Total Strokes Pumped" field="totalStrokes" pile={pile} onUpdate={onUpdate} computedValue={derived.totalStrokes}/>
-      <ComputedField label="Actual Volume (ft³)" field="actualVolume" pile={pile} onUpdate={onUpdate} computedValue={derived.actual} unit={derived.calibFactor?"":" (needs pump calib.)"}/>
+      <ComputedField label="Actual Volume (ft³)" field="actualVolume" pile={pile} onUpdate={onUpdate} computedValue={derived.actual} unit={derived.calibFactor ? ` (calib ${derived.calibFactor}${pile.groutEnd && pile.calibFactorSnapshot ? ", locked at grout" : ""})` : " (needs pump calib.)"}/>
       <ComputedField label="Grout Factor" field="groutFactor" pile={pile} onUpdate={onUpdate} computedValue={derived.groutFactor}/>
       <ComputedField label="Reinforcing Steel" field="reinfSteel" pile={pile} onUpdate={onUpdate} computedValue={pile.pileType||""} type="text"/><Field obj={pile} set={set} label="Grout Strength" field="groutStrength"/>
       <Field obj={pile} set={set} label="Grout Supplier" field="groutSupplier"/><Field obj={pile} set={set} label="Product Code" field="productCode"/>
@@ -1894,6 +1910,95 @@ function PileSettingsModal({ pile, index, projectPiles, onUpdate, onClose, onCre
 }
 
 // ── Collapsible section with a clear, large header (Drill/Grout/Trucks/Notes) ─
+// ── Help / how-to-use guide ─────────────────────────────────────────────────
+// A full-screen, scrollable in-app page (Menu → ❓ Help) so field crews and
+// new inspectors can learn the app without a separate video or PDF to send
+// around. Plain-text content lives in HELP_SECTIONS below the component so
+// it's easy to find and edit later without touching the layout code.
+function HelpSection({ title, defaultOpen, children }) {
+  const [open, setOpen] = useState(!!defaultOpen);
+  return (
+    <div style={{background:"#0d2236",borderRadius:12,overflow:"hidden",border:"1px solid #1a3a5c",marginBottom:10}}>
+      <div onClick={()=>setOpen(o=>!o)} style={{display:"flex",alignItems:"center",gap:10,padding:"13px 14px",cursor:"pointer",background:"#12283d"}}>
+        <span style={{color:"#fff",fontSize:15,fontWeight:800,flex:1}}>{title}</span>
+        <span style={{color:"#4fc3f7",fontSize:14}}>{open?"▲":"▼"}</span>
+      </div>
+      {open && <div style={{padding:"14px 16px",color:"#c9d9e8",fontSize:13.5,lineHeight:1.6}}>{children}</div>}
+    </div>
+  );
+}
+const helpP = { margin:"0 0 10px 0" };
+const helpH = { color:"#4fc3f7", fontWeight:800, fontSize:12.5, margin:"14px 0 6px 0" };
+const helpStep = (n, title, body) => (
+  <div key={n} style={{display:"flex",gap:10,marginBottom:12}}>
+    <div style={{flexShrink:0,width:22,height:22,borderRadius:"50%",background:"#1a3a5c",color:"#7fc4f0",fontSize:11,fontWeight:900,display:"flex",alignItems:"center",justifyContent:"center"}}>{n}</div>
+    <div><div style={{color:"#fff",fontWeight:700,marginBottom:2}}>{title}</div><div>{body}</div></div>
+  </div>
+);
+function HelpScreen({ onClose }) {
+  return (
+    <div style={{ position:"fixed", inset:0, background:"#0a1622", zIndex:400, display:"flex", flexDirection:"column" }}>
+      <div style={{ display:"flex", alignItems:"center", gap:10, padding:"14px 16px", borderBottom:"1px solid #1a3a5c", background:"#0d2236", flexShrink:0 }}>
+        <span style={{ fontSize:18, fontWeight:900, color:"#fff", flex:1 }}>❓ Help — how to use this app</span>
+        <button onClick={onClose} style={{ background:"#1e4a73", border:"none", color:"#fff", fontSize:14, fontWeight:800, padding:"9px 16px", borderRadius:9, cursor:"pointer" }}>Done</button>
+      </div>
+      <div style={{ flex:1, overflowY:"auto", padding:16, maxWidth:640, margin:"0 auto", width:"100%", boxSizing:"border-box" }}>
+        <div style={{ color:"#a8c0d9", fontSize:12.5, marginBottom:16 }}>
+          A quick reference for the daily workflow and what the app is calculating behind the scenes. You can jump straight to a section, or send this whole page to a coworker (Menu → ❓ Help works the same on their tablet or phone).
+        </div>
+
+        <HelpSection title="🔩 Daily workflow, start to finish" defaultOpen>
+          {helpStep(1, "Check Project Info", "At the top of the day, open the Project Info section (or Menu → Settings) and confirm the project name, contractor, equipment, and pump calibration factor are correct for today. This carries forward automatically for every pile you log that day.")}
+          {helpStep(2, "Add a pile", "Tap + New Pile. Set its Pile Type, Diameter, and Ground Elevation in Settings — the app remembers typical values per pile type so most fields pre-fill next time.")}
+          {helpStep(3, "Drill", "Tap Start Drilling, then tap once per foot (or once per 5ft, if you switch the interval) to log seconds and torque as the auger goes down. Use Quick Drill instead for a re-drill where you only need start/end time, no foot-by-foot log.")}
+          {helpStep(4, "Grout", "Tap Start Grouting, then enter the stroke counter reading at each grout band (bottom of pile up to ground level). The app runs a live grout-factor pace check as you go — see the Calculations section below for what that means.")}
+          {helpStep(5, "Finish the pile", "Tap Finish Grouting. This locks in the Grout End time, the pump calibration used for this pile, and fills in the Details tab (Drill Depth, Total Strokes, Actual Volume, Grout Factor) automatically.")}
+          {helpStep(6, "Fill in Details", "Truck tickets, quantities, batch times, flow/spread, reinforcing steel, cutoff elevation — whatever wasn't captured live. Enter either Cutoff Elevation or Pile Cap Thickness and the app computes the other.")}
+          {helpStep(7, "Repeat for the next pile", "Use Prev/Next at the top of the pile page to move through the day's piles without going back to the list every time.")}
+          {helpStep(8, "End of day", "Menu → 📑 Summary table (Word) generates the official SOR-format table for all of today's piles, ready to paste into the client document. Menu → Settings → Export saves a backup file — do this daily.")}
+        </HelpSection>
+
+        <HelpSection title="⚠️ What the badges mean">
+          <p style={helpP}><b style={{color:"#e74c3c"}}>⚠ N sec missing</b> — one or more feet were drilled without a seconds/torque reading logged. Tap into the pile and fill in the gaps, or use "Copy from another pile" in Settings if a whole run needs backfilling.</p>
+          <p style={helpP}><b style={{color:"#f0c040"}}>▼ Low grout factor</b> — the pile's finished (or running) grout factor is below target. See "Grout factor & minimum strokes" below for what that means and why it happens.</p>
+          <p style={helpP}><b style={{color:"#f0c040"}}>Trucks empty</b> — the pile was finished with no truck/ticket/quantity info entered on the Details tab.</p>
+        </HelpSection>
+
+        <HelpSection title="🧮 What the app is calculating">
+          <div style={helpH}>Drill Depth &amp; Theoretical Volume</div>
+          <p style={helpP}>Drill Depth comes from your deepest foot tap during drilling (or a manual entry overrides it). Theoretical Volume is the plain cylinder volume for that depth and pile diameter — π·(dia/2)²·depth — i.e. how much grout a perfectly clean hole of that size and depth should take.</p>
+
+          <div style={helpH}>Total Strokes &amp; Actual Volume</div>
+          <p style={helpP}>Total Strokes is the stroke-counter reading at ground level (0ft) during grouting — the cumulative count for the whole pour. Actual Volume = Total Strokes × Pump Calibration (ft³ of grout per stroke, from Project Info). This is the real volume the pump put into the ground.</p>
+
+          <div style={helpH}>Grout Factor</div>
+          <p style={helpP}>Grout Factor = Actual Volume ÷ Theoretical Volume. A factor of 1.0 means exactly the theoretical hole volume went in; above 1.0 means extra grout went into the surrounding soil (normal and expected — that's what fills voids and confirms good contact); notably below target usually means something's off (a void didn't get filled, a stroke count was missed, or the calibration is wrong).</p>
+
+          <div style={helpH}>Grout factor target &amp; minimum strokes (the live pace check)</div>
+          <p style={helpP}>While you're grouting, the app tracks a running average, not a per-interval score — a single low 5ft band is not itself a problem if the next band makes up for it, since it's the average that matters. It compares your cumulative strokes so far to what's required to stay on pace for the day's target grout factor (Settings, default 1.15) by the time you reach ground level.</p>
+          <p style={helpP}>Once grout return is actually observed at the surface, spans shallower than the depth where that happened only need to replace the pipe/annulus volume (factor 1.0) rather than the full target — the annulus is already confirmed full at that point, so holding it to the higher target above the return depth would flag a false warning.</p>
+          <p style={helpP}>If grout return shows up shallower than the "Min. grout return depth" setting (default 10ft), the app flags a heads-up — that can mean the contractor isn't maintaining proper grout pressure head as the auger comes up.</p>
+
+          <div style={helpH}>Elevations &amp; pile length</div>
+          <p style={helpP}>Tip Elevation = Ground Elevation − Drill Depth. Cutoff Elevation and Pile Cap Thickness are linked (Ground Elevation − Cap Thickness = Cutoff Elevation) — enter whichever one the contractor gives you and the app fills in the other. Pile Length = Cutoff Elevation − Tip Elevation.</p>
+
+          <div style={helpH}>Pump calibration — locked in per pile</div>
+          <p style={helpP}>The calibration factor (ft³ per stroke) lives in Project Info and applies to whatever pile you're currently grouting. The moment you tap Finish Grouting, that day's current calibration value is locked into that specific pile. If the contractor recalibrates the pump partway through the day and you update the Calibration field, only piles grouted <i>after</i> that point use the new value — piles you already finished keep the calibration that was actually in effect when they were poured, so their numbers never silently change later.</p>
+        </HelpSection>
+
+        <HelpSection title="🔧 Other useful features">
+          <p style={helpP}><b>Redistribute seconds</b> — if you logged total time for a run of feet instead of per-foot, tap-first/tap-last a range and the app splits the seconds evenly across it.</p>
+          <p style={helpP}><b>Copy from another pile</b> (in Pile Settings) — backfills seconds/torque from a similar completed pile when a run was missed entirely. It does not add any note to the pile automatically.</p>
+          <p style={helpP}><b>Quick Drill (Re-Drill)</b> — for a redrill where a foot-by-foot log isn't practical; records start/end time only.</p>
+          <p style={helpP}><b>Sunlight mode</b> (Menu) — inverts the screen for readability in direct sun.</p>
+          <p style={helpP}><b>Offline</b> — the app works with no signal; everything saves to the tablet itself. Export a backup (Menu → Settings) regularly, and don't rely on Private/Incognito browsing, which can wipe data when the tab closes.</p>
+          <p style={helpP}><b>Two tablets, one job</b> — if two inspectors log piles separately (e.g. one at home on a phone), use Export on each and Merge teammate's backup on one device to combine both sets of piles without duplicates.</p>
+        </HelpSection>
+      </div>
+    </div>
+  );
+}
+
 function Section({ icon, title, open, onToggle, badge, badgeColor, children }) {
   return (
     <div style={{background:"#0d2236",borderRadius:12,overflow:"hidden",border:"1px solid #1a3a5c"}}>
@@ -2555,6 +2660,7 @@ function App() {
   const [openPileId, setOpenPileId] = useState(null); // which pile is showing as a dedicated page (null = list view)
   const [showAppSettings, setShowAppSettings] = useState(false); // app-level settings modal (Export/Import)
   const [showMenu, setShowMenu] = useState(false); // hamburger menu (projects, actions)
+  const [showHelp, setShowHelp] = useState(false); // in-app Help / How-to-use guide
 
   // Export all data as JSON file for backup/transfer to new hosting
   const handleExport = () => {
@@ -2863,11 +2969,14 @@ ${rows}
 
             <div style={{ color:"#4a7fa5", fontSize:11, fontWeight:800, marginBottom:6 }}>ACTIONS</div>
             <button onClick={()=>{handleSummary();setShowMenu(false);}} disabled={generating} style={{width:"100%",padding:"11px 12px",borderRadius:10,border:"1px solid #e67e22",background:"transparent",color:"#e6a35c",fontSize:13,fontWeight:700,cursor:"pointer",marginBottom:8,textAlign:"left"}}>📑 Summary table (Word)</button>
+            <button onClick={()=>{setShowHelp(true);setShowMenu(false);}} style={{width:"100%",padding:"11px 12px",borderRadius:10,border:"1px solid #2d6a9f",background:"transparent",color:"#4fc3f7",fontSize:13,fontWeight:700,cursor:"pointer",marginBottom:8,textAlign:"left"}}>❓ Help — how to use this app</button>
             <button onClick={()=>{setSunMode(s=>!s);setShowMenu(false);}} style={{width:"100%",padding:"11px 12px",borderRadius:10,border:"1px solid #2d4a5c",background:sunMode?"#ffd700":"transparent",color:sunMode?"#333":"#a8c0d9",fontSize:13,fontWeight:700,cursor:"pointer",marginBottom:8,textAlign:"left",filter:sunMode?"invert(1) hue-rotate(180deg)":"none"}}>{sunMode?"🌙 Normal mode":"☀️ Sunlight mode"}</button>
             <button onClick={()=>{setShowAppSettings(true);setShowMenu(false);}} style={{width:"100%",padding:"11px 12px",borderRadius:10,border:"1px solid #2d4a5c",background:"transparent",color:"#a8c0d9",fontSize:13,fontWeight:700,cursor:"pointer",textAlign:"left"}}>⚙️ Settings (backup / restore)</button>
           </div>
         </div>
       )}
+
+      {showHelp && <HelpScreen onClose={()=>setShowHelp(false)}/>}
 
       {showAppSettings && (
         <div style={{ position:"fixed", top:0, left:0, width:"100vw", height:"100dvh", background:"rgba(0,0,0,0.8)", zIndex:300, display:"flex", alignItems:"center", justifyContent:"center", padding:20 }} onClick={()=>setShowAppSettings(false)}>
