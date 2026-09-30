@@ -98,7 +98,7 @@ const emptyPile = () => ({
   pileNo: "",
   drillStart: null, drillEnd: null, groutStart: null, groutEnd: null,
   drillStartEpoch: null, footStartEpoch: null, pausedAt: null,
-  calibFactorSnapshot: "", calibDateSnapshot: "", // pump calibration locked in at Grout End (see calcDerived)
+  projectInfoSnapshot: null, // full Project Info (calibration, equipment, inspector, contractor...) locked in at Grout End — see calcDerived
   feet: [],
   groutBands: [],
   refusalDepth: null,
@@ -163,13 +163,17 @@ const calcDerived = (pile, project) => {
   const groundBand = (pile.groutBands||[]).find(b => b.depth === 0);
   const totalStrokes = pile.totalStrokes || (groundBand?.strokes ? String(groundBand.strokes) : "");
   // Calibration: once a pile is grouted (Grout End set), it locks in whatever
-  // calibration factor was active AT THAT MOMENT (calibFactorSnapshot, stamped
-  // in GroutScreen's finish handlers) so a later mid-day recalibration never
-  // rewrites a pile that's already done. A pile still in progress (or an old
-  // pile logged before this feature existed, with no snapshot) falls back to
-  // the day's current Settings value, same as before.
-  const snap = parseFloat(pile.calibFactorSnapshot);
-  const calibFactor = (pile.groutEnd && snap > 0) ? snap
+  // Project Info was active AT THAT MOMENT (pile.projectInfoSnapshot, stamped
+  // in GroutScreen's finish handlers — see there for what it captures) so a
+  // later mid-day change (recalibration, new equipment, etc.) never rewrites
+  // a pile that's already done. A pile still in progress, or an old pile
+  // logged before this feature existed (no snapshot, or only the earlier
+  // calibFactorSnapshot-only version of it), falls back to the day's current
+  // Settings value, same as always.
+  const snapProj = (pile.groutEnd && pile.projectInfoSnapshot) ? pile.projectInfoSnapshot : null;
+  const legacySnap = parseFloat(pile.calibFactorSnapshot); // back-compat: piles locked by the earlier, calibration-only version of this feature
+  const snapCalib = snapProj ? parseFloat(snapProj.pumpCalibFactor) : (pile.groutEnd && legacySnap > 0 ? legacySnap : NaN);
+  const calibFactor = (snapCalib > 0) ? snapCalib
     : (parseFloat(project.pumpCalibFactor) > 0 ? parseFloat(project.pumpCalibFactor) : null);
   const actual = pile.actualVolume ||
     ((totalStrokes && calibFactor) ? String(round2(parseFloat(totalStrokes) * calibFactor)) : "");
@@ -984,27 +988,26 @@ function GroutScreen({ pile, onUpdate }) {
   const phase = !pile.groutStart ? "idle" : !pile.groutEnd ? "grouting" : "done";
 
   const startGrouting = () => onUpdate({ ...pile, groutStart: nowStr() });
-  // Lock in today's calibration the moment a pile finishes grouting, so a
-  // later mid-day recalibration doesn't retroactively change this pile's
-  // Actual Volume / Grout Factor (see calcDerived).
-  const calibSnapshotFields = () => {
-    const proj = dayProjectInfo();
-    return { calibFactorSnapshot: proj.pumpCalibFactor || "", calibDateSnapshot: proj.lastCalibDate || "" };
-  };
+  // Lock in the ENTIRE Project Info panel (calibration, equipment, inspector,
+  // piling contractor, etc.) the moment a pile finishes grouting, so a later
+  // mid-day change — recalibration, a swapped rig, a new inspector taking
+  // over — never silently rewrites a pile that's already done (see
+  // calcDerived, which reads calibration from this snapshot once it exists).
+  const projectInfoSnapshotFields = () => ({ projectInfoSnapshot: { ...dayProjectInfo() } });
   const finishGrouting = () => {
     // Guard: don't let a pile finish without its pile number
     if (!pile.pileNo || !pile.pileNo.trim()) { setWarnPileNo(""); setShowPileNoWarn(true); return; }
     saveTypeMemory(pile);
-    onUpdate({ ...pile, groutEnd: nowStr(), ...calibSnapshotFields() });
+    onUpdate({ ...pile, groutEnd: nowStr(), ...projectInfoSnapshotFields() });
   };
   const finishWithPileNo = () => {
     saveTypeMemory(pile);
-    onUpdate({ ...pile, pileNo: warnPileNo.trim(), groutEnd: nowStr(), ...calibSnapshotFields() });
+    onUpdate({ ...pile, pileNo: warnPileNo.trim(), groutEnd: nowStr(), ...projectInfoSnapshotFields() });
     setShowPileNoWarn(false);
   };
   const finishWithoutPileNo = () => {
     saveTypeMemory(pile);
-    onUpdate({ ...pile, groutEnd: nowStr(), ...calibSnapshotFields() });
+    onUpdate({ ...pile, groutEnd: nowStr(), ...projectInfoSnapshotFields() });
     setShowPileNoWarn(false);
   };
 
@@ -1703,8 +1706,27 @@ function PileDetailsForm({ pile, onUpdate }) {
   const lbl=FIELD_LBL;
   const project = dayProjectInfo();
   const derived = calcDerived(pile, project);
+  // If this pile locked in a Project Info snapshot at Grout End, and the
+  // day's Settings have since changed on anything that matters for the
+  // record (calibration, equipment, inspector, contractor), show what was
+  // actually on file when THIS pile was grouted — so a later recalibration
+  // or equipment swap is visible per-pile, not just silently overridden.
+  const snap = pile.projectInfoSnapshot;
+  const snapDiffers = snap && ["pumpCalibFactor","equipment","inspector","pilingContractor"]
+    .some(f => (snap[f]||"") !== (project[f]||""));
   return (
     <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:"0 12px"}}>
+      {snapDiffers && (
+        <div style={{gridColumn:"1/-1",marginBottom:12,padding:"10px 12px",borderRadius:10,background:"#1a2f12",border:"1px solid #3d6b1f"}}>
+          <div style={{color:"#8fd45c",fontWeight:800,fontSize:12,marginBottom:4}}>🔒 Locked at Grout End — Settings have changed since</div>
+          <div style={{color:"#b8d9a0",fontSize:11.5,lineHeight:1.5}}>
+            {snap.pumpCalibFactor !== undefined && (snap.pumpCalibFactor||"") !== (project.pumpCalibFactor||"") && <div>Calibration: <b>{snap.pumpCalibFactor||"—"}</b> ft³/stroke (now {project.pumpCalibFactor||"—"})</div>}
+            {(snap.equipment||"") !== (project.equipment||"") && <div>Equipment: <b>{snap.equipment||"—"}</b> (now {project.equipment||"—"})</div>}
+            {(snap.inspector||"") !== (project.inspector||"") && <div>Inspector: <b>{snap.inspector||"—"}</b> (now {project.inspector||"—"})</div>}
+            {(snap.pilingContractor||"") !== (project.pilingContractor||"") && <div>Piling Contractor: <b>{snap.pilingContractor||"—"}</b> (now {project.pilingContractor||"—"})</div>}
+          </div>
+        </div>
+      )}
       <div style={{ marginBottom:10 }}>
         <div style={lbl}>Pile Type <span style={{color:"#4a7fa5",fontWeight:400}}>(remembers its typical values)</span></div>
         <input value={pile.pileType} onChange={e=>{
@@ -1722,7 +1744,7 @@ function PileDetailsForm({ pile, onUpdate }) {
       <ComputedField label="Cutoff Elevation (ft)" field="cutoffElevation" pile={pile} onUpdate={onUpdate} computedValue={derived.cutoffElevation}/>
       <ComputedField label="Theoretical Vol. (ft³)" field="theoreticalVol" pile={pile} onUpdate={onUpdate} computedValue={derived.theoretical}/>
       <ComputedField label="Total Strokes Pumped" field="totalStrokes" pile={pile} onUpdate={onUpdate} computedValue={derived.totalStrokes}/>
-      <ComputedField label="Actual Volume (ft³)" field="actualVolume" pile={pile} onUpdate={onUpdate} computedValue={derived.actual} unit={derived.calibFactor ? ` (calib ${derived.calibFactor}${pile.groutEnd && pile.calibFactorSnapshot ? ", locked at grout" : ""})` : " (needs pump calib.)"}/>
+      <ComputedField label="Actual Volume (ft³)" field="actualVolume" pile={pile} onUpdate={onUpdate} computedValue={derived.actual} unit={derived.calibFactor ? ` (calib ${derived.calibFactor}${pile.groutEnd && (pile.projectInfoSnapshot || pile.calibFactorSnapshot) ? ", locked at grout" : ""})` : " (needs pump calib.)"}/>
       <ComputedField label="Grout Factor" field="groutFactor" pile={pile} onUpdate={onUpdate} computedValue={derived.groutFactor}/>
       <ComputedField label="Reinforcing Steel" field="reinfSteel" pile={pile} onUpdate={onUpdate} computedValue={pile.pileType||""} type="text"/><Field obj={pile} set={set} label="Grout Strength" field="groutStrength"/>
       <Field obj={pile} set={set} label="Grout Supplier" field="groutSupplier"/><Field obj={pile} set={set} label="Product Code" field="productCode"/>
@@ -1929,6 +1951,15 @@ function HelpSection({ title, defaultOpen, children }) {
 }
 const helpP = { margin:"0 0 10px 0" };
 const helpH = { color:"#4fc3f7", fontWeight:800, fontSize:12.5, margin:"14px 0 6px 0" };
+// Real screenshots of the app, so the guide isn't just paragraphs to read.
+function HelpImg({ src, caption }) {
+  return (
+    <div style={{ margin:"4px 0 16px 44px" }}>
+      <img src={src} alt={caption||""} style={{ width:"100%", maxWidth:280, display:"block", borderRadius:12, border:"1px solid #2d4a5c", boxShadow:"0 4px 16px rgba(0,0,0,0.4)" }}/>
+      {caption && <div style={{ color:"#7a95ad", fontSize:11, marginTop:6 }}>{caption}</div>}
+    </div>
+  );
+}
 const helpStep = (n, title, body) => (
   <div key={n} style={{display:"flex",gap:10,marginBottom:12}}>
     <div style={{flexShrink:0,width:22,height:22,borderRadius:"50%",background:"#1a3a5c",color:"#7fc4f0",fontSize:11,fontWeight:900,display:"flex",alignItems:"center",justifyContent:"center"}}>{n}</div>
@@ -1949,13 +1980,18 @@ function HelpScreen({ onClose }) {
 
         <HelpSection title="🔩 Daily workflow, start to finish" defaultOpen>
           {helpStep(1, "Check Project Info", "At the top of the day, open the Project Info section (or Menu → Settings) and confirm the project name, contractor, equipment, and pump calibration factor are correct for today. This carries forward automatically for every pile you log that day.")}
-          {helpStep(2, "Add a pile", "Tap + New Pile. Set its Pile Type, Diameter, and Ground Elevation in Settings — the app remembers typical values per pile type so most fields pre-fill next time.")}
+          <HelpImg src="screenshots/01_project_info.png" caption="Project Info, filled in for the day — this is where calibration, equipment, and contractor live."/>
+          {helpStep(2, "Add a pile", "Tap + New Pile. Set its Pile No., Diameter, and Ground Elevation in Details — the app remembers typical values per pile type so most fields pre-fill next time.")}
+          <HelpImg src="screenshots/02_ready_to_drill.png" caption="A new pile, ready to drill — Pile No. and Ground Elevation are set."/>
           {helpStep(3, "Drill", "Tap Start Drilling, then tap once per foot (or once per 5ft, if you switch the interval) to log seconds and torque as the auger goes down. Use Quick Drill instead for a re-drill where you only need start/end time, no foot-by-foot log.")}
+          <HelpImg src="screenshots/03_drilling.png" caption="Mid-drill at 14ft — tap the big green button per foot, dial in torque on the slider."/>
           {helpStep(4, "Grout", "Tap Start Grouting, then enter the stroke counter reading at each grout band (bottom of pile up to ground level). The app runs a live grout-factor pace check as you go — see the Calculations section below for what that means.")}
-          {helpStep(5, "Finish the pile", "Tap Finish Grouting. This locks in the Grout End time, the pump calibration used for this pile, and fills in the Details tab (Drill Depth, Total Strokes, Actual Volume, Grout Factor) automatically.")}
+          <HelpImg src="screenshots/04_grouting_partial.png" caption="Grouting in progress — bands fill in green as strokes are entered; the pace check up top tracks the running grout factor."/>
+          {helpStep(5, "Finish the pile", "Tap Finish Grouting. This locks in the Grout End time and today's Project Info (calibration, equipment, inspector, contractor) for this specific pile, and fills in the Details tab (Drill Depth, Total Strokes, Actual Volume, Grout Factor) automatically.")}
           {helpStep(6, "Fill in Details", "Truck tickets, quantities, batch times, flow/spread, reinforcing steel, cutoff elevation — whatever wasn't captured live. Enter either Cutoff Elevation or Pile Cap Thickness and the app computes the other.")}
           {helpStep(7, "Repeat for the next pile", "Use Prev/Next at the top of the pile page to move through the day's piles without going back to the list every time.")}
           {helpStep(8, "End of day", "Menu → 📑 Summary table (Word) generates the official SOR-format table for all of today's piles, ready to paste into the client document. Menu → Settings → Export saves a backup file — do this daily.")}
+          <HelpImg src="screenshots/06_menu.png" caption="Menu (☰ top right) — Summary table, this Help page, Sunlight mode, and backup/restore all live here."/>
         </HelpSection>
 
         <HelpSection title="⚠️ What the badges mean">
@@ -1970,6 +2006,7 @@ function HelpScreen({ onClose }) {
 
           <div style={helpH}>Total Strokes &amp; Actual Volume</div>
           <p style={helpP}>Total Strokes is the stroke-counter reading at ground level (0ft) during grouting — the cumulative count for the whole pour. Actual Volume = Total Strokes × Pump Calibration (ft³ of grout per stroke, from Project Info). This is the real volume the pump put into the ground.</p>
+          <HelpImg src="screenshots/05b_computed_fields.png" caption='Details tab after Finish Grouting — Drill Depth, Total Strokes, Actual Volume, and Grout Factor all auto-fill. Actual Volume shows exactly which calibration factor it used.'/>
 
           <div style={helpH}>Grout Factor</div>
           <p style={helpP}>Grout Factor = Actual Volume ÷ Theoretical Volume. A factor of 1.0 means exactly the theoretical hole volume went in; above 1.0 means extra grout went into the surrounding soil (normal and expected — that's what fills voids and confirms good contact); notably below target usually means something's off (a void didn't get filled, a stroke count was missed, or the calibration is wrong).</p>
@@ -1982,8 +2019,9 @@ function HelpScreen({ onClose }) {
           <div style={helpH}>Elevations &amp; pile length</div>
           <p style={helpP}>Tip Elevation = Ground Elevation − Drill Depth. Cutoff Elevation and Pile Cap Thickness are linked (Ground Elevation − Cap Thickness = Cutoff Elevation) — enter whichever one the contractor gives you and the app fills in the other. Pile Length = Cutoff Elevation − Tip Elevation.</p>
 
-          <div style={helpH}>Pump calibration — locked in per pile</div>
-          <p style={helpP}>The calibration factor (ft³ per stroke) lives in Project Info and applies to whatever pile you're currently grouting. The moment you tap Finish Grouting, that day's current calibration value is locked into that specific pile. If the contractor recalibrates the pump partway through the day and you update the Calibration field, only piles grouted <i>after</i> that point use the new value — piles you already finished keep the calibration that was actually in effect when they were poured, so their numbers never silently change later.</p>
+          <div style={helpH}>Project Info — locked in per pile</div>
+          <p style={helpP}>Project Info (calibration, equipment, inspector, piling contractor, etc.) applies to whatever pile you're currently working on. The moment you tap Finish Grouting, the <i>entire</i> Project Info panel as it stood at that moment is locked into that specific pile — not just calibration. If anything changes partway through the day — the contractor recalibrates the pump, a rig gets swapped, a different inspector takes over — only piles finished <i>after</i> that change pick up the new values; piles you already finished keep what was actually true when they were grouted, so their numbers and record never silently change later. If a pile's locked-in info differs from what's currently in Settings, the Details tab shows a green "Locked at Grout End" note with both values.</p>
+          <HelpImg src="screenshots/05_details_locked.png" caption="This pile finished under calibration 0.163 and Rig 3. Settings were later changed to 0.190 and Rig 5 — the pile keeps its own locked-in values and shows exactly what changed."/>
         </HelpSection>
 
         <HelpSection title="🔧 Other useful features">
